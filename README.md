@@ -41,7 +41,7 @@ For agents that do not manage skills automatically, copy the desired folders und
 
 The bundled scripts require the `kiutils` fork published at `https://github.com/mash/kiutils`.
 
-Install the Python dependencies from this repository before running the scripts:
+Your AI agent should guide you through dependency installation when it first needs to run the bundled scripts. The manual command is:
 
 ```bash
 pip install .
