@@ -1,0 +1,9 @@
+[project]
+name = "kicad-skills"
+version = "0.1.0"
+description = "AI-agent skills and scripts for working with KiCad schematic and PCB design files."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "kiutils @ git+https://github.com/mash/kiutils.git@60c2f22a4caca4012ecfac726cc542d2ede22c18",
+]

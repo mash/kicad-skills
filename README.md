@@ -37,6 +37,16 @@ Use it whenever you need to query, edit, render, or validate KiCad files.
 
 For agents that do not manage skills automatically, copy the desired folders under `skills/` into the agent's local skill directory. Keep each skill folder intact, including its `SKILL.md`, `agents/`, and `scripts/` files.
 
+## Dependencies
+
+The bundled scripts require the `kiutils` fork published at `https://github.com/mash/kiutils`.
+
+Install the Python dependencies from this repository before running the scripts:
+
+```bash
+pip install .
+```
+
 Example prompts after import:
 
 ```text

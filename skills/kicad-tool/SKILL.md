@@ -23,6 +23,22 @@ python3 plugins/kicad-skills/skills/kicad-tool/scripts/kicad_tool.py <domain> <c
 
 `KICAD_CLI` overrides the executable. Default: `/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli`.
 
+## Dependencies
+
+Before using the scripts in a new environment, check whether the Python dependencies are available:
+
+```bash
+python3 -c "import kiutils"
+```
+
+If `kiutils` is missing, install this repository's Python dependencies from the repository root:
+
+```bash
+python3 -m pip install .
+```
+
+The `kiutils` dependency is a fork pinned in `pyproject.toml`. If the environment requires approval for network access or package installation, ask before installing. Do not silently vendor, rewrite, or bypass the dependency.
+
 ## Argument Conventions
 
 - `<schematic>` is always the first positional for schematic commands.

@@ -11,7 +11,6 @@ from xml.etree import ElementTree as ET
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
-sys.path.insert(0, "/Users/mash/src/github.com/mvnmgrx/kiutils/src")
 
 from kiutils.schematic import Schematic
 from text_collision_core import Rect, collision_rect, text_boxes_collide
