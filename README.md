@@ -19,24 +19,36 @@ skills/
 
 ## Usage
 
-Reference this directory from your agent runtime, or copy the relevant skill folders into the agent's skill/search path.
+Ask your coding agent to import either the whole repository or a single skill folder into its local skill/search path.
 
-The CLI entrypoint is:
+Whole repository:
 
-```bash
-python3 skills/kicad-tool/scripts/kicad_tool.py <domain> <command> ...
+```text
+Import https://github.com/mash/kicad-skills as local KiCad skills for this project.
+Use all skills under skills/ when working with KiCad schematic or PCB files.
 ```
 
-Example:
+Single skill:
 
-```bash
-python3 skills/kicad-tool/scripts/kicad_tool.py sch validate path/to/top.kicad_sch --sheet path/to/edited.kicad_sch
+```text
+Import https://github.com/mash/kicad-skills/tree/main/skills/kicad-tool as a local skill.
+Use it whenever you need to query, edit, render, or validate KiCad files.
 ```
 
-Set `KICAD_CLI` if KiCad is not installed at the default macOS app path:
+For agents that do not manage skills automatically, copy the desired folders under `skills/` into the agent's local skill directory. Keep each skill folder intact, including its `SKILL.md`, `agents/`, and `scripts/` files.
 
-```bash
-KICAD_CLI=/path/to/kicad-cli python3 skills/kicad-tool/scripts/kicad_tool.py --help
+Example prompts after import:
+
+```text
+Use the KiCad skills to inspect this schematic sheet and summarize the current ERC/netlist status.
+```
+
+```text
+Use the KiCad workflow skill to make this schematic edit safely, including dry-run, validation, and a concise report.
+```
+
+```text
+Use the KiCad schematic cleanup loop to improve the visual score of this sheet without changing connectivity.
 ```
 
 ## Scope
