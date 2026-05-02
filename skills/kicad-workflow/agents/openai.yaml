@@ -1,0 +1,4 @@
+interface:
+  display_name: "KiCad Workflow"
+  short_description: "Safely edit and validate KiCad hardware design files"
+  default_prompt: "Use this skill to plan, edit, and validate KiCad schematic or PCB changes."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "KiCad Schematic Cleanup Loop"
+  short_description: "Iteratively improve schematic visual score"
+  default_prompt: "Use this skill to clean up a KiCad schematic sheet after functional edits."

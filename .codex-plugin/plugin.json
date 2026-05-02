@@ -1,0 +1,30 @@
+{
+  "name": "kicad-skills",
+  "version": "0.1.0",
+  "description": "Codex skills and scripts for KiCad schematic and PCB workflows.",
+  "author": {
+    "name": "mash",
+    "email": "",
+    "url": "https://github.com/mash"
+  },
+  "homepage": "https://github.com/mash/kicad-skills",
+  "repository": "https://github.com/mash/kicad-skills",
+  "license": "MIT",
+  "keywords": ["kicad", "schematic", "pcb", "eda", "hardware"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "KiCad Skills",
+    "shortDescription": "KiCad schematic and PCB workflows for Codex.",
+    "longDescription": "A set of Codex skills and bundled scripts for querying, editing, rendering, and validating KiCad hardware design files.",
+    "developerName": "mash",
+    "category": "Developer Tools",
+    "capabilities": ["Read", "Write"],
+    "websiteURL": "https://github.com/mash/kicad-skills",
+    "defaultPrompt": [
+      "Validate this KiCad schematic edit.",
+      "Query a KiCad schematic region.",
+      "Clean up this KiCad schematic sheet."
+    ],
+    "brandColor": "#2F80ED"
+  }
+}
