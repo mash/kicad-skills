@@ -1,6 +1,6 @@
 ---
 name: kicad-tool
-description: Use for ANY read or write on `.kicad_sch` / `.kicad_pcb` / `.kicad_pro` files — never `Read`/`cat`/`grep`/`Edit` them directly. Also use when the user asks what pins connect to what other pins, what net a pin is on, which components share a net, or the value/MPN/footprint of a component ref. All query, edit, render, inspect, ERC/DRC, netlist, and validate ops go through this CLI.
+description: Use for ANY read or write on `.kicad_sch` / `.kicad_pcb` files — never `Read`/`cat`/`grep`/`Edit` them directly. Also use when the user asks what pins connect to what other pins, what net a pin is on, which components share a net, or the value/MPN/footprint of a component ref. All query, edit, render, inspect, ERC/DRC, netlist, and validate ops go through this CLI.
 ---
 
 # KiCad Tool
