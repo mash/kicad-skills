@@ -196,6 +196,185 @@ def _coords_close(a: float, b: float, tol: float = 0.001) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Shared symbol-block helpers
+# ---------------------------------------------------------------------------
+
+
+_BUILTIN_PROP_KEYS = ("Reference", "Value", "Footprint", "Datasheet", "Description")
+
+
+def _cascade_property_at(block: str, dx: float, dy: float, drot: float) -> str:
+    """Shift each (property "<builtin>" ... (at PX PY [PR])) by (dx, dy, drot).
+
+    Preserves the original (at) arity: if source had no rotation, output has no rotation.
+    Built-in keys: Reference, Value, Footprint, Datasheet, Description.
+    """
+    prop_re = re.compile(
+        r'(\(property\s+"(?:Reference|Value|Footprint|Datasheet|Description)"\s+"[^"]*"\s*\n\s*)'
+        r"\(at\s+(-?[\d.]+)\s+(-?[\d.]+)(?:\s+(-?[\d.]+))?\s*\)"
+    )
+
+    def _shift(m: re.Match) -> str:
+        head = m.group(1)
+        px = float(m.group(2)) + dx
+        py = float(m.group(3)) + dy
+        had_rot = m.group(4) is not None
+        if had_rot:
+            prot = float(m.group(4)) + drot
+            return f"{head}(at {_fmt_coord(px)} {_fmt_coord(py)} {_fmt_coord(prot)})"
+        if abs(drot) < 1e-9:
+            return f"{head}(at {_fmt_coord(px)} {_fmt_coord(py)})"
+        return f"{head}(at {_fmt_coord(px)} {_fmt_coord(py)} {_fmt_coord(drot)})"
+
+    return prop_re.sub(_shift, block)
+
+
+def _replace_property_value_quoted(block: str, key: str, value: str) -> tuple[str, str]:
+    """Replace the value of (property "<key>" "<value>" ...) preserving escapes.
+
+    Returns (new_block, old_value_decoded). Raises ValueError if 0 or >1 matches.
+    """
+    pat = re.compile(
+        r'(\(property\s+"' + re.escape(key) + r'"\s+")'
+        r'([^"\\]*(?:\\.[^"\\]*)*)'
+        r'(")'
+    )
+    matches = list(pat.finditer(block))
+    if not matches:
+        available = re.findall(r'\(property\s+"([^"]+)"\s+"', block)
+        raise ValueError(f"property {key!r} not found; available: {available}")
+    if len(matches) > 1:
+        raise ValueError(f"duplicate property {key!r} ({len(matches)} matches)")
+    m = matches[0]
+    old_raw = m.group(2)
+    old_decoded = re.sub(r'\\(.)', lambda mm: mm.group(1), old_raw)
+    new_raw = value.replace("\\", "\\\\").replace('"', '\\"')
+    new_block = block[: m.start(2)] + new_raw + block[m.end(2) :]
+    return new_block, old_decoded
+
+
+def _assert_kicad10_format(text: str) -> None:
+    """Reject pre-KiCad-10 files where uuids may be unquoted, e.g. (uuid abcd-...)."""
+    if re.search(r'\(uuid\s+[^"\s)]', text):
+        raise ValueError(
+            "schematic appears to use pre-KiCad-10 format (unquoted UUIDs); "
+            "this command supports KiCad 10+ only"
+        )
+
+
+def _collect_all_refs(text: str) -> set[str]:
+    """Collect all symbol Reference values, plus any (reference "X") inside (instances ...).
+
+    Skips placeholder refs containing '?' (un-annotated parts).
+    """
+    refs: set[str] = set()
+    for o, e in _iter_top_blocks(text, "symbol"):
+        block = text[o:e]
+        for m in re.finditer(r'\(property\s+"Reference"\s+"([^"]+)"', block):
+            r = m.group(1)
+            if "?" not in r:
+                refs.add(r)
+        for m in re.finditer(r'\(reference\s+"([^"]+)"', block):
+            r = m.group(1)
+            if "?" not in r:
+                refs.add(r)
+    return refs
+
+
+def _find_clone_source(text: str, lib_id: str):
+    """Return ((open, end, block, meta), rejected) — second element is always the rejected list.
+
+    First element is the chosen candidate tuple, or None if no clean candidate found.
+    Filters: lib_id must match, (unit 1) (or no unit), no (mirror ...), Reference has no '?'.
+    """
+    rejected: list[str] = []
+    chosen = None
+    for o, e in _iter_top_blocks(text, "symbol"):
+        block = text[o:e]
+        m_lib = re.search(r'\(lib_id\s+"([^"]+)"\)', block)
+        if not m_lib or m_lib.group(1) != lib_id:
+            continue
+        m_ref = re.search(r'\(property\s+"Reference"\s+"([^"]+)"', block)
+        ref = m_ref.group(1) if m_ref else "?"
+        m_mirror = re.search(r"\(mirror\s+([xy])\s*\)", block)
+        mirror = m_mirror.group(1) if m_mirror else None
+        m_unit = re.search(r"\(unit\s+(\d+)\)", block)
+        unit = int(m_unit.group(1)) if m_unit else 1
+        if "?" in ref:
+            rejected.append(f"{ref} (unannotated)")
+            continue
+        if mirror is not None:
+            rejected.append(f"{ref} (mirror {mirror})")
+            continue
+        if unit != 1:
+            rejected.append(f"{ref} (unit {unit})")
+            continue
+        sym_at = _block_at(block)
+        if sym_at is None:
+            continue
+        if chosen is not None:
+            continue
+        m_val = re.search(r'\(property\s+"Value"\s+"([^"]*)"', block)
+        m_fp = re.search(r'\(property\s+"Footprint"\s+"([^"]*)"', block)
+        meta = {
+            "at": sym_at,
+            "unit": unit,
+            "mirror": mirror,
+            "lib_id": lib_id,
+            "uuid": _block_uuid(block),
+            "ref": ref,
+            "value": m_val.group(1) if m_val else "",
+            "footprint": m_fp.group(1) if m_fp else "",
+        }
+        chosen = (o, e, block, meta)
+    return chosen, rejected
+
+
+def _reissue_symbol_uuid(block: str) -> str:
+    """Replace ONLY the symbol's own (uuid "...") — the first child uuid of the symbol block.
+
+    Inside a block extracted by _iter_top_blocks (which starts at "(symbol" with NO
+    leading tab, but children retain their original "\\n\\t\\t" indent), the symbol's
+    own uuid line begins with "\\n\\t\\t(uuid ...". Pin uuids are nested under (pin)
+    at deeper indent and are matched separately by _reissue_pin_uuids.
+    """
+    pat = re.compile(r'(\n\t\t\(uuid\s+)"[^"]+"')
+    return pat.sub(lambda m: f'{m.group(1)}"{_new_uuid()}"', block, count=1)
+
+
+def _reissue_pin_uuids(block: str) -> str:
+    """Reissue every (pin "<num>" (uuid "...")) inside the block."""
+    pat = re.compile(r'(\(pin\s+"[^"]+"\s*\(uuid\s+)"[^"]+"')
+    return pat.sub(lambda m: f'{m.group(1)}"{_new_uuid()}"', block)
+
+
+def _replace_symbol_at(block: str, x: float, y: float, rot: float) -> str:
+    """Replace the symbol's own first (at ...)."""
+    sym_at_re = re.compile(r"\(at\s+-?[\d.]+\s+-?[\d.]+(?:\s+-?[\d.]+)?\s*\)")
+    m = sym_at_re.search(block)
+    if not m:
+        raise ValueError("symbol (at ...) not found in block")
+    new_at = f"(at {_fmt_coord(x)} {_fmt_coord(y)} {_fmt_coord(rot)})"
+    return block[: m.start()] + new_at + block[m.end() :]
+
+
+def _rewrite_all_instance_references(block: str, new_ref: str) -> str:
+    """Replace every (reference "...") inside (instances ...) with new_ref."""
+    m = re.search(r"\(instances\b", block)
+    if not m:
+        return block
+    inst_open = m.start()
+    inst_end = _find_block_end(block, inst_open)
+    inst_block = block[inst_open:inst_end]
+    new_inst = re.sub(
+        r'(\(reference\s+)"[^"]*"',
+        lambda mm: f'{mm.group(1)}"{new_ref}"',
+        inst_block,
+    )
+    return block[:inst_open] + new_inst + block[inst_end:]
+
+
+# ---------------------------------------------------------------------------
 # move_symbol
 # ---------------------------------------------------------------------------
 
@@ -252,19 +431,7 @@ def move_symbol(
     new_block = block[: m_sym_at.start()] + new_sym_at + block[m_sym_at.end() :]
 
     # Cascade property (at ...): shift each by (dx, dy) and add drot to its rotation.
-    prop_re = re.compile(
-        r'(\(property\s+"(?:Reference|Value|Footprint|Datasheet|Description)"\s+"[^"]*"\s*\n\s*)'
-        r"\(at\s+(-?[\d.]+)\s+(-?[\d.]+)(?:\s+(-?[\d.]+))?\s*\)"
-    )
-
-    def _shift(m: re.Match) -> str:
-        head = m.group(1)
-        px = float(m.group(2)) + dx
-        py = float(m.group(3)) + dy
-        prot = float(m.group(4) or "0") + drot
-        return f"{head}(at {_fmt_coord(px)} {_fmt_coord(py)} {_fmt_coord(prot)})"
-
-    new_block = prop_re.sub(_shift, new_block)
+    new_block = _cascade_property_at(new_block, dx, dy, drot)
 
     new_text = text[:open_idx] + new_block + text[end_idx:]
 
@@ -449,6 +616,131 @@ def delete_symbol(
     }
 
 
+def add_symbol(
+    sch_path: str | Path,
+    lib_id: str,
+    ref: str,
+    at: tuple[float, float],
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Add a new symbol instance by cloning an existing same-lib_id sibling.
+
+    KiCad 10+ schematic format only.
+
+    Strategy:
+      - Pick a clean clone source: same lib_id, (unit 1), no (mirror ...),
+        Reference without '?'.
+      - Clone the block, reissue the symbol's own (uuid ...) and every pin's
+        (pin "<num>" (uuid ...)). The (path "/<SHEET-UUID>" ...) inside
+        (instances ...) is preserved verbatim.
+      - Replace the symbol's own (at) with (x, y, src_rot); cascade property
+        (at) by (dx, dy, drot=0) to track the symbol body.
+      - Rewrite Reference property and every (reference "...") inside
+        (instances ...) to the new ref.
+      - Strip (fields_autoplaced) so KiCad re-autoplaces on next open.
+      - Insert the cloned block immediately after the source.
+
+    Notes:
+      - Value, Footprint, rotation, mirror are inherited from the source.
+        Use `set_symbol_property` / `move_symbol` to change them.
+      - Placeholder refs containing '?' (e.g. "C?") are NOT included in the
+        collision check; they are intended to be resolved by the annotator.
+    """
+    sch_path = Path(sch_path)
+    text = _read(sch_path)
+
+    # Rule 13
+    _assert_kicad10_format(text)
+
+    # Rule 11
+    if ref in _collect_all_refs(text):
+        raise ValueError(f"reference {ref!r} already exists in {sch_path}")
+
+    # Rule 5: lib_symbols precondition
+    libsyms = _find_lib_symbols_block(text)
+    if libsyms is None:
+        raise ValueError(f"(lib_symbols ...) block not found in {sch_path}")
+    ls_open, ls_end = libsyms
+    if _find_named_symbol_block(text, ls_open, ls_end, lib_id) is None:
+        raise ValueError(f'lib_id "{lib_id}" not found in (lib_symbols ...)')
+
+    # Rule 4: clone source auto-selection
+    chosen, rejected = _find_clone_source(text, lib_id)
+    if chosen is None:
+        if rejected:
+            raise ValueError(
+                f'no clean clone candidate for "{lib_id}" '
+                f"(need a unit-1, unmirrored, fully-annotated instance); "
+                f"rejected: [{', '.join(rejected)}]; "
+                "place one manually in KiCad first"
+            )
+        raise ValueError(
+            f'no existing instance of "{lib_id}"; place one manually in KiCad first'
+        )
+    src_open, src_end, src_block, src_meta = chosen
+
+    # geometry
+    x, y = float(at[0]), float(at[1])
+    src_x, src_y, src_rot = src_meta["at"]
+    dx, dy = x - src_x, y - src_y
+
+    new_block = src_block
+
+    # Rule 1: enumerate UUID reissue (path UUIDs untouched)
+    new_block = _reissue_symbol_uuid(new_block)
+    new_block = _reissue_pin_uuids(new_block)
+
+    # Rule 8: defensive lib_id rewrite (no-op since source matched)
+    new_block = re.sub(
+        r'(\(lib_id\s+)"[^"]*"',
+        lambda m: f'{m.group(1)}"{lib_id}"',
+        new_block,
+        count=1,
+    )
+
+    # Rule 7: strip (fields_autoplaced)
+    new_block = re.sub(r"\s*\(fields_autoplaced\s*\)", "", new_block)
+
+    # symbol body (at): keep src rotation
+    new_block = _replace_symbol_at(new_block, x, y, src_rot)
+
+    # Rule 3: cascade property (at) — drot=0
+    new_block = _cascade_property_at(new_block, dx, dy, 0.0)
+
+    # Rule 9: rewrite Reference property only
+    new_block, _old_ref_value = _replace_property_value_quoted(
+        new_block, "Reference", ref
+    )
+
+    # Rule 2: rewrite ALL (reference "...") inside (instances ...)
+    new_block = _rewrite_all_instance_references(new_block, ref)
+
+    # Rule 10: insert after the source block
+    _, src_full_stop = _expand_block_with_indent(text, src_open, src_end)
+    new_text = text[:src_full_stop] + "\t" + new_block + "\n" + text[src_full_stop:]
+
+    changed = _maybe_write(sch_path, text, new_text, dry_run)
+    return {
+        "action": "add_symbol",
+        "changed": changed,
+        "diff": _diff(text, new_text, sch_path),
+        "details": {
+            "lib_id": lib_id,
+            "ref": ref,
+            "at": [x, y, src_rot],
+            "cloned_from": {
+                "ref": src_meta["ref"],
+                "lib_id": src_meta["lib_id"],
+                "unit": src_meta["unit"],
+                "uuid": src_meta["uuid"],
+                "mirror": src_meta["mirror"],
+            },
+            "value": src_meta["value"],
+            "footprint": src_meta["footprint"],
+        },
+    }
+
+
 def set_symbol_property(
     sch_path: str | Path,
     ref: str,
@@ -474,33 +766,24 @@ def set_symbol_property(
     # Enumerate available keys for error messages.
     available_keys = re.findall(r'\(property\s+"([^"]+)"\s+"', block)
 
-    pat = re.compile(
-        r'(\(property\s+"' + re.escape(key) + r'"\s+")'
-        r'([^"\\]*(?:\\.[^"\\]*)*)'
-        r'(")'
-    )
-    matches = list(pat.finditer(block))
-    if not matches:
-        raise ValueError(
-            f"property {key!r} not found on symbol {ref!r}; "
-            f"available keys: {available_keys}"
-        )
-    if len(matches) > 1:
-        raise ValueError(
-            f"duplicate property {key!r} on symbol {ref!r} ({len(matches)} matches)"
-        )
+    try:
+        new_block, old_value = _replace_property_value_quoted(block, key, value)
+    except ValueError as exc:
+        msg = str(exc)
+        if "not found" in msg:
+            raise ValueError(
+                f"property {key!r} not found on symbol {ref!r}; "
+                f"available keys: {available_keys}"
+            ) from None
+        if "duplicate" in msg:
+            # extract count for legacy message shape
+            cm = re.search(r"\((\d+) matches\)", msg)
+            count = cm.group(1) if cm else "?"
+            raise ValueError(
+                f"duplicate property {key!r} on symbol {ref!r} ({count} matches)"
+            ) from None
+        raise
 
-    m = matches[0]
-    old_value_raw = m.group(2)
-    # Decode escape sequences for the report's old_value.
-    old_value = re.sub(r'\\(.)', lambda mm: mm.group(1), old_value_raw)
-
-    # Escape the new value for embedding: backslash and double-quote.
-    new_value_raw = value.replace("\\", "\\\\").replace('"', '\\"')
-
-    new_block = (
-        block[: m.start(2)] + new_value_raw + block[m.end(2) :]
-    )
     new_text = text[:open_idx] + new_block + text[end_idx:]
 
     changed = _maybe_write(sch_path, text, new_text, dry_run)
@@ -1032,6 +1315,7 @@ def delete_junction(
 __all__ = [
     "move_symbol",
     "delete_symbol",
+    "add_symbol",
     "set_symbol_property",
     "move_symbol_property",
     "add_wire",

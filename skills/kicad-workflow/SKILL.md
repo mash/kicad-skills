@@ -50,6 +50,8 @@ Then state and wait for approval:
 4. **Placement** — for each new/moved symbol, which existing symbol or net it should sit *near* and why. Apply project electrical-design rules (grouping, partitioning, decoupling near supply pins).
 5. **Layout sketch (ASCII art) — required** — show **both** the current and proposed local layout side-by-side. Coordinates are supplementary; the sketch is the primary artifact for the user to spot orientation/topology issues before any edit runs.
 
+   The sketch must show **incident topology**, not just symbol bodies: every wire stub off each drawn symbol, every junction in the bbox, every mid-span tap on shown wires. Distinguish real T-taps (perpendicular endpoint or co-located junction) from co-linear continuations (same-axis adjacent endpoint — not a tap). When adding to a group, copy one existing member's stubs into the proposed sketch (else the new pin↔rail stub gets forgotten and ERC fails unconnected). When deleting a wire, list every tap on it in the current sketch and how each is reconnected in the proposed.
+
    ```
    Current:                Proposed:
         VCC                     VCC
@@ -85,6 +87,8 @@ Baseline diff exits non-zero on regression (new ERC errors, removed nets, remove
 Smallest change satisfying the request. Always pass `--dry-run` first via `sch edit` / `pcb edit`, then re-run without it.
 
 Scope of stage 1: connectivity, nets, symbols, pins, values, hierarchy, ERC correctness. Do **not** chase `sch inspect` score, collisions, or wire-corner counts here — that is stage 2.
+
+To spawn a new symbol instance: `sch edit symbol add <sch> <lib_id> <REF> <X,Y>` clones an existing same-`lib_id` sibling (unit 1, unmirrored) so `lib_symbols` stays consistent. For follow-up tweaks use `sch edit symbol set-property` (Value / Footprint / MPN) and `sch edit symbol move` (rotation / position).
 
 If the new edit happens to introduce obvious local mess (overlapping label, crossing wire) that blocks reading the diff, fix only that local mess. Anything broader belongs to the cleanup loop.
 

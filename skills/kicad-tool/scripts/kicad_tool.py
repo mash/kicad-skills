@@ -1139,6 +1139,17 @@ def cmd_sch_edit_symbol_move_property(args: argparse.Namespace) -> int:
     return _emit_edit(args, res)
 
 
+def cmd_sch_edit_symbol_add(args: argparse.Namespace) -> int:
+    res = sch_edit.add_symbol(
+        args.schematic,
+        lib_id=args.lib_id,
+        ref=args.ref,
+        at=args.at,
+        dry_run=args.dry_run,
+    )
+    return _emit_edit(args, res)
+
+
 def cmd_sch_edit_symbol_add_pin(args: argparse.Namespace) -> int:
     x, y = args.at
     res = sch_edit.add_pin(
@@ -1330,6 +1341,18 @@ def _add_edit_subparsers(sch_commands) -> None:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--format", choices=["json", "text"], default="text")
     p.set_defaults(func=cmd_sch_edit_symbol_move_property)
+
+    p = sym_act.add_parser(
+        "add",
+        help="add a new symbol instance by cloning an existing same-lib_id sibling",
+    )
+    p.add_argument("schematic", type=Path)
+    p.add_argument("lib_id", help='e.g. "Device:C"')
+    p.add_argument("ref", help="new reference, e.g. C42")
+    p.add_argument("at", type=parse_xy, help="X,Y in schematic coords")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--format", choices=["text", "json"], default="text")
+    p.set_defaults(func=cmd_sch_edit_symbol_add)
 
     p = sym_act.add_parser(
         "add-pin",
