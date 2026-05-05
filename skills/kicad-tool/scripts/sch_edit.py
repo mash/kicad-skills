@@ -315,6 +315,208 @@ def move_symbol(
     }
 
 
+def delete_symbol(
+    sch_path: str | Path,
+    ref: str,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Delete a symbol by reference.
+
+    The block is removed verbatim (including its leading indent and trailing
+    newline). Connected wires/labels/junctions are NOT modified — instead, the
+    return ``details.connected_taps`` reports counts of those whose endpoint
+    coordinates coincide with one of the deleted symbol's pins, so the caller
+    can clean them up explicitly.
+
+    The ``lib_symbols`` entry is also left untouched (it may be referenced by
+    another symbol; KiCad ignores unused entries).
+    """
+    sch_path = Path(sch_path)
+    text = _read(sch_path)
+
+    found = _find_symbol_block_by_ref(text, ref)
+    if not found:
+        raise ValueError(f"symbol with reference {ref!r} not found in {sch_path}")
+    open_idx, end_idx, block = found
+
+    # ---- Extract metadata for the report ----
+    sym_at = _block_at(block)
+    if sym_at is None:
+        raise ValueError(f"symbol {ref!r} has no (at ...) field")
+    sx, sy, srot = sym_at
+
+    lib_id = None
+    m_lib = re.search(r'\(lib_id\s+"([^"]+)"\)', block)
+    if m_lib:
+        lib_id = m_lib.group(1)
+    sym_uuid = _block_uuid(block)
+
+    # ---- Compute absolute pin coordinates via kiutils (mirrors move_symbol) ----
+    pins_abs: list[dict[str, Any]] = []
+    try:
+        sch_obj = Schematic.from_file(str(sch_path))
+        lib = {s.entryName: s for s in sch_obj.libSymbols}
+        sym_obj = next(
+            (
+                s
+                for s in sch_obj.schematicSymbols
+                if any(p.key == "Reference" and p.value == ref for p in s.properties)
+            ),
+            None,
+        )
+        if sym_obj is not None:
+            libsym = lib.get(sym_obj.entryName)
+            if libsym is not None:
+                for unit in getattr(libsym, "units", []):
+                    for pin in getattr(unit, "pins", []):
+                        ax, ay = local_to_schematic(
+                            sx, sy, int(srot) % 360, pin.position.X, pin.position.Y
+                        )
+                        pins_abs.append(
+                            {
+                                "number": pin.number,
+                                "name": pin.name,
+                                "x": round(ax, 4),
+                                "y": round(ay, 4),
+                            }
+                        )
+    except Exception as exc:  # noqa: BLE001
+        pins_abs = [{"error": f"pin computation failed: {exc}"}]
+
+    # ---- Count connected taps (do not modify them) ----
+    pin_pts: list[tuple[float, float]] = [
+        (float(p["x"]), float(p["y"]))
+        for p in pins_abs
+        if "x" in p and "y" in p
+    ]
+
+    def _matches_pin(x: float, y: float, tol: float = 0.01) -> bool:
+        for px, py in pin_pts:
+            if abs(px - x) <= tol and abs(py - y) <= tol:
+                return True
+        return False
+
+    wire_taps = 0
+    for w_open, w_end in _iter_top_blocks(text, "wire"):
+        wblock = text[w_open:w_end]
+        pts = _wire_endpoints(wblock)
+        if pts is None:
+            continue
+        (a, b) = pts
+        if _matches_pin(a[0], a[1]) or _matches_pin(b[0], b[1]):
+            wire_taps += 1
+
+    label_taps = 0
+    for ltoken in _LABEL_TOKENS.values():
+        for l_open, l_end in _iter_top_blocks(text, ltoken):
+            lblock = text[l_open:l_end]
+            lat = _block_at(lblock)
+            if lat is None:
+                continue
+            if _matches_pin(lat[0], lat[1]):
+                label_taps += 1
+
+    junction_taps = 0
+    for j_open, j_end in _iter_top_blocks(text, "junction"):
+        jblock = text[j_open:j_end]
+        jat = _block_at(jblock)
+        if jat is None:
+            continue
+        if _matches_pin(jat[0], jat[1]):
+            junction_taps += 1
+
+    # ---- Remove the block ----
+    start, stop = _expand_block_with_indent(text, open_idx, end_idx)
+    new_text = text[:start] + text[stop:]
+    changed = _maybe_write(sch_path, text, new_text, dry_run)
+
+    return {
+        "action": "delete_symbol",
+        "changed": changed,
+        "diff": _diff(text, new_text, sch_path),
+        "details": {
+            "ref": ref,
+            "lib_id": lib_id,
+            "at": {"x": sx, "y": sy, "rotation": srot},
+            "uuid": sym_uuid,
+            "connected_taps": {
+                "wires": wire_taps,
+                "labels": label_taps,
+                "junctions": junction_taps,
+            },
+            "pins": pins_abs,
+        },
+    }
+
+
+def set_symbol_property(
+    sch_path: str | Path,
+    ref: str,
+    key: str,
+    value: str,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Set the value of a (property "<key>" "<value>") field on a symbol.
+
+    Any property key is accepted (standard built-ins and user-defined like
+    ``MPN``, ``LCSC``, ``Manufacturer``). The block's ``(at ...)``,
+    ``(effects ...)`` and other subblocks are preserved — only the value
+    string token is rewritten. Creating new properties is not supported.
+    """
+    sch_path = Path(sch_path)
+    text = _read(sch_path)
+
+    found = _find_symbol_block_by_ref(text, ref)
+    if not found:
+        raise ValueError(f"symbol with reference {ref!r} not found in {sch_path}")
+    open_idx, end_idx, block = found
+
+    # Enumerate available keys for error messages.
+    available_keys = re.findall(r'\(property\s+"([^"]+)"\s+"', block)
+
+    pat = re.compile(
+        r'(\(property\s+"' + re.escape(key) + r'"\s+")'
+        r'([^"\\]*(?:\\.[^"\\]*)*)'
+        r'(")'
+    )
+    matches = list(pat.finditer(block))
+    if not matches:
+        raise ValueError(
+            f"property {key!r} not found on symbol {ref!r}; "
+            f"available keys: {available_keys}"
+        )
+    if len(matches) > 1:
+        raise ValueError(
+            f"duplicate property {key!r} on symbol {ref!r} ({len(matches)} matches)"
+        )
+
+    m = matches[0]
+    old_value_raw = m.group(2)
+    # Decode escape sequences for the report's old_value.
+    old_value = re.sub(r'\\(.)', lambda mm: mm.group(1), old_value_raw)
+
+    # Escape the new value for embedding: backslash and double-quote.
+    new_value_raw = value.replace("\\", "\\\\").replace('"', '\\"')
+
+    new_block = (
+        block[: m.start(2)] + new_value_raw + block[m.end(2) :]
+    )
+    new_text = text[:open_idx] + new_block + text[end_idx:]
+
+    changed = _maybe_write(sch_path, text, new_text, dry_run)
+    return {
+        "action": "set_symbol_property",
+        "changed": changed,
+        "diff": _diff(text, new_text, sch_path),
+        "details": {
+            "ref": ref,
+            "key": key,
+            "old_value": old_value,
+            "new_value": value,
+        },
+    }
+
+
 def move_symbol_property(
     sch_path: str | Path,
     ref: str,
@@ -481,16 +683,12 @@ def _wire_endpoints(block: str) -> tuple[tuple[float, float], tuple[float, float
 
 def delete_wire(
     sch_path: str | Path,
-    uuid: str | None = None,
-    pt_from: tuple[float, float] | None = None,
-    pt_to: tuple[float, float] | None = None,
+    uuid: str,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Delete a (wire ...) block by uuid or matching endpoints (order-insensitive)."""
+    """Delete a (wire ...) block by uuid."""
     sch_path = Path(sch_path)
     text = _read(sch_path)
-    if uuid is None and (pt_from is None or pt_to is None):
-        raise ValueError("delete_wire requires either uuid or both pt_from and pt_to")
 
     target: tuple[int, int] | None = None
     matched_uuid: str | None = None
@@ -498,35 +696,14 @@ def delete_wire(
     for open_idx, end_idx in _iter_top_blocks(text, "wire"):
         block = text[open_idx:end_idx]
         wuuid = _block_uuid(block)
-        if uuid is not None and wuuid == uuid:
+        if wuuid == uuid:
             target = (open_idx, end_idx)
             matched_uuid = wuuid
             matched_pts = _wire_endpoints(block)
             break
-        if uuid is None:
-            pts = _wire_endpoints(block)
-            if pts is None:
-                continue
-            (a, b) = pts
-            ok = (
-                _coords_close(a[0], pt_from[0])
-                and _coords_close(a[1], pt_from[1])
-                and _coords_close(b[0], pt_to[0])
-                and _coords_close(b[1], pt_to[1])
-            ) or (
-                _coords_close(a[0], pt_to[0])
-                and _coords_close(a[1], pt_to[1])
-                and _coords_close(b[0], pt_from[0])
-                and _coords_close(b[1], pt_from[1])
-            )
-            if ok:
-                target = (open_idx, end_idx)
-                matched_uuid = wuuid
-                matched_pts = pts
-                break
 
     if target is None:
-        raise ValueError("no matching wire found")
+        raise ValueError(f"no wire with uuid {uuid}")
 
     start, stop = _expand_block_with_indent(text, target[0], target[1])
     new_text = text[:start] + text[stop:]
@@ -554,6 +731,12 @@ _LABEL_TOKENS = {
 }
 
 
+def _normalize_label_orientation(angle: float) -> tuple[float, str]:
+    a = int(angle) % 360
+    justify = "left" if a in (0, 90) else "right"
+    return float(a), justify
+
+
 def _find_sibling_label_block(text: str, kind_token: str) -> tuple[int, int, str] | None:
     for open_idx, end_idx in _iter_top_blocks(text, kind_token):
         return open_idx, end_idx, text[open_idx:end_idx]
@@ -566,17 +749,17 @@ def add_label(
     name: str,
     at: tuple[float, float],
     rotation: float = 0.0,
-    justify: str | None = None,  # noqa: ARG001 — kept for API parity; cloned from sibling
     dry_run: bool = False,
 ) -> dict[str, Any]:
     """Add a label by cloning a sibling block of the same kind.
 
-    Per the KiCad workflow rules, we never synthesize ``(justify ...)``,
+    Per the kicad-hardware-editing rules, we never synthesize ``(justify ...)``,
     ``(effects ...)``, or related quirks from scratch — we copy from a sibling
     in the same file and only swap text/at/uuid.
 
-    The ``justify`` argument is currently ignored; the cloned sibling's justify
-    is preserved. Pass it explicitly only if a future implementation overrides.
+    For ``global_label`` blocks with ``(shape passive)``, the justify is
+    overridden post-clone based on ``rotation`` (left for 0/90, right for
+    180/270) so that ``--rotation`` alone picks the correct orientation.
     """
     sch_path = Path(sch_path)
     text = _read(sch_path)
@@ -594,7 +777,7 @@ def add_label(
 
     new_uuid = _new_uuid()
     x, y = float(at[0]), float(at[1])
-    rot = float(rotation)
+    rot, new_justify = _normalize_label_orientation(float(rotation))
 
     # Replace the head: ({token} "OLDNAME" → ({token} "NEWNAME"
     new_block = re.sub(
@@ -617,14 +800,23 @@ def add_label(
         new_block,
         count=1,
     )
-    # If global label has Intersheetrefs (at ...), align it to label position.
+    # If global label has Intersheetrefs (at ...), align position only —
+    # preserve the original angle (Intersheetrefs is hidden; angle is irrelevant).
     if token == "global_label":
         new_block = re.sub(
-            r'(\(property\s+"Intersheetrefs"[^\n]*\n\s*)\(at\s+-?[\d.]+\s+-?[\d.]+(?:\s+-?[\d.]+)?\s*\)',
-            lambda m: f"{m.group(1)}(at {_fmt_coord(x)} {_fmt_coord(y)} {_fmt_coord(rot)})",
+            r'(\(property\s+"Intersheetrefs"[^\n]*\n\s*)\(at\s+-?[\d.]+\s+-?[\d.]+(\s+-?[\d.]+)?\s*\)',
+            lambda m: f"{m.group(1)}(at {_fmt_coord(x)} {_fmt_coord(y)}{m.group(2) or ''})",
             new_block,
             count=1,
         )
+        # Override justify for passive global labels per rotation (left for 0/90, right for 180/270).
+        if "(shape passive)" in new_block:
+            new_block = re.sub(
+                r"(\(justify\s+)(left|right)(\s*\))",
+                lambda m: f"{m.group(1)}{new_justify}{m.group(3)}",
+                new_block,
+                count=1,
+            )
 
     # Insert immediately after the sibling block (preserving its trailing newline).
     insert_at = sib_end
@@ -685,7 +877,8 @@ def move_label(
         raise ValueError("label has no (at ...) field")
     old_x, old_y, old_rot = old_at
     new_x, new_y = float(to[0]), float(to[1])
-    new_rot = float(rotation) if rotation is not None else old_rot
+    raw_new_rot = float(rotation) if rotation is not None else old_rot
+    new_rot, new_justify = _normalize_label_orientation(raw_new_rot)
 
     # Replace the first (at ...)
     new_block = re.sub(
@@ -695,13 +888,23 @@ def move_label(
         count=1,
     )
     if token == "global_label":
-        # Update Intersheetrefs (at ...) — typically rot 0.
+        # Update Intersheetrefs (at ...) position only — preserve original angle
+        # (Intersheetrefs is hidden; its rotation has no visual/ERC effect).
         new_block = re.sub(
-            r'(\(property\s+"Intersheetrefs"[^\n]*\n\s*)\(at\s+-?[\d.]+\s+-?[\d.]+(?:\s+-?[\d.]+)?\s*\)',
-            lambda m: f"{m.group(1)}(at {_fmt_coord(new_x)} {_fmt_coord(new_y)} {_fmt_coord(new_rot)})",
+            r'(\(property\s+"Intersheetrefs"[^\n]*\n\s*)\(at\s+-?[\d.]+\s+-?[\d.]+(\s+-?[\d.]+)?\s*\)',
+            lambda m: f"{m.group(1)}(at {_fmt_coord(new_x)} {_fmt_coord(new_y)}{m.group(2) or ''})",
             new_block,
             count=1,
         )
+        # For passive global labels, sync (justify ...) to the new rotation
+        # (left for 0/90, right for 180/270). KiCad's R-key produces this pairing.
+        if "(shape passive)" in new_block:
+            new_block = re.sub(
+                r"(\(justify\s+)(left|right)(\s*\))",
+                lambda m: f"{m.group(1)}{new_justify}{m.group(3)}",
+                new_block,
+                count=1,
+            )
 
     new_text = text[:open_idx] + new_block + text[end_idx:]
     changed = _maybe_write(sch_path, text, new_text, dry_run)
@@ -791,14 +994,11 @@ def add_junction(
 
 def delete_junction(
     sch_path: str | Path,
-    uuid: str | None = None,
-    at: tuple[float, float] | None = None,
+    uuid: str,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     sch_path = Path(sch_path)
     text = _read(sch_path)
-    if uuid is None and at is None:
-        raise ValueError("delete_junction requires uuid or at")
 
     target: tuple[int, int] | None = None
     matched_uuid: str | None = None
@@ -807,20 +1007,14 @@ def delete_junction(
         block = text[open_idx:end_idx]
         juuid = _block_uuid(block)
         jat = _block_at(block)
-        if uuid is not None and juuid == uuid:
+        if juuid == uuid:
             target = (open_idx, end_idx)
             matched_uuid = juuid
             matched_at = jat
             break
-        if uuid is None and at is not None and jat is not None:
-            if _coords_close(jat[0], at[0]) and _coords_close(jat[1], at[1]):
-                target = (open_idx, end_idx)
-                matched_uuid = juuid
-                matched_at = jat
-                break
 
     if target is None:
-        raise ValueError("no matching junction found")
+        raise ValueError(f"no junction with uuid {uuid}")
     start, stop = _expand_block_with_indent(text, target[0], target[1])
     new_text = text[:start] + text[stop:]
     changed = _maybe_write(sch_path, text, new_text, dry_run)
@@ -837,6 +1031,8 @@ def delete_junction(
 
 __all__ = [
     "move_symbol",
+    "delete_symbol",
+    "set_symbol_property",
     "move_symbol_property",
     "add_wire",
     "delete_wire",
@@ -1105,7 +1301,7 @@ def add_pin(
     matches the namespace) the standalone .kicad_sym library file.
 
     Args:
-        lib_id: e.g. "project:PLACEHOLDER_1" — outer library symbol id.
+        lib_id: e.g. "cupwarmer:PLACEHOLDER_1" — outer library symbol id.
         at: (x, y, rotation) in symbol-local coordinates.
     """
     if electrical_type not in _PIN_ELECTRICAL_TYPES:
@@ -1170,34 +1366,12 @@ def add_pin(
     # ---- lib file update ----
     lib_info: dict[str, Any] = {"changed": False, "path": None, "diff_summary": None}
     if lib_file is None:
-        lib_info["skipped"] = "no standalone lib file requested"
-        combined_diff = sch_diff
-        return {
-            "action": "add_pin",
-            "changed": sch_changed,
-            "diff": combined_diff,
-            "details": {
-                "schematic": {
-                    "path": str(sch_path),
-                    "changed": sch_changed,
-                    "diff_summary": sch_diff,
-                },
-                "lib_file": lib_info,
-                "pin": {
-                    "number": number,
-                    "name": name,
-                    "at": [round(x, 2), round(y, 2), round(rot, 2)],
-                    "length": round(length_f, 2),
-                    "type": electrical_type,
-                    "shape": shape,
-                },
-            },
-        }
+        lib_file = Path("hardware/kicad/cupwarmer-hw/cupwarmer.kicad_sym")
     lib_path = Path(lib_file)
     lib_info["path"] = str(lib_path)
 
     # Auto-skip if namespace doesn't match the lib file's stem.
-    expected_ns = lib_path.stem
+    expected_ns = lib_path.stem  # e.g. "cupwarmer"
     if ns and ns != expected_ns:
         lib_info["skipped"] = (
             f"lib-id namespace {ns!r} does not match lib file stem {expected_ns!r}"

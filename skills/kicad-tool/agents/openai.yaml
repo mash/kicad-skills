@@ -1,4 +1,4 @@
 interface:
   display_name: "KiCad Tool"
-  short_description: "Run the unified KiCad CLI"
-  default_prompt: "Use this skill to run kicad-tool commands for schematic rendering, inspect scoring, ERC, netlist export, validation, and PCB DRC."
+  short_description: "Run the repository-local unified KiCad CLI"
+  default_prompt: "Use this skill to run kicad-tool commands for schematic SVG export, inspect scoring, ERC, netlist export, validation, and PCB DRC."

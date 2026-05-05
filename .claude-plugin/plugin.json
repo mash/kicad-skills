@@ -1,0 +1,13 @@
+{
+  "name": "kicad-skills",
+  "version": "0.1.0",
+  "description": "Claude Code skills and bundled scripts for KiCad schematic and PCB workflows.",
+  "author": {
+    "name": "mash",
+    "url": "https://github.com/mash"
+  },
+  "homepage": "https://github.com/mash/kicad-skills",
+  "repository": "https://github.com/mash/kicad-skills",
+  "license": "MIT",
+  "keywords": ["kicad", "schematic", "pcb", "eda", "hardware"]
+}

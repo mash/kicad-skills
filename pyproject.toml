@@ -5,5 +5,5 @@ description = "AI-agent skills and scripts for working with KiCad schematic and 
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-  "kiutils @ git+https://github.com/mash/kiutils.git@60c2f22a4caca4012ecfac726cc542d2ede22c18",
+  "kiutils @ git+https://github.com/mash/kiutils.git@77994e0e65c3d97e3f11910fe3d05d1fc3b06fc7",
 ]

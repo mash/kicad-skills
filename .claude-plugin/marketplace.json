@@ -1,0 +1,14 @@
+{
+  "name": "kicad-skills",
+  "owner": {
+    "name": "mash",
+    "url": "https://github.com/mash"
+  },
+  "plugins": [
+    {
+      "name": "kicad-skills",
+      "source": "./",
+      "description": "Claude Code skills and bundled scripts for KiCad schematic and PCB workflows."
+    }
+  ]
+}
