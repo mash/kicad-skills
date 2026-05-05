@@ -189,10 +189,7 @@ def cmd_sch_render_region(args: argparse.Namespace) -> int:
     except (RuntimeError, ValueError) as exc:
         sys.stderr.write(f"{exc}\n")
         return 2
-    if args.format == "text":
-        print(png)
-    else:
-        print_json({"png": str(png), "bbox": list(args.bbox)})
+    print(png)
     return 0
 
 
@@ -551,10 +548,7 @@ def cmd_pcb_render_region(args: argparse.Namespace) -> int:
     except (RuntimeError, ValueError, FileNotFoundError) as exc:
         sys.stderr.write(f"{exc}\n")
         return 2
-    if args.format == "text":
-        print(png)
-    else:
-        print_json({"png": str(png), "bbox": list(args.bbox), "layers": layers})
+    print(png)
     return 0
 
 
@@ -1466,8 +1460,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     render_region_parser.add_argument("schematic", type=Path)
     render_region_parser.add_argument("bbox", type=parse_bbox, help="X1,Y1,X2,Y2 in mm")
-    render_region_parser.add_argument("--output", type=Path, default=Path("tmp/region.png"))
-    render_region_parser.add_argument("--format", choices=["json", "text"], default="text")
+    render_region_parser.add_argument("-o", "--output", type=Path, default=Path("tmp/region.png"))
     render_region_parser.set_defaults(func=cmd_sch_render_region)
 
     inspect_parser = sch_commands.add_parser("inspect", help="inspect schematic score and visual collisions")
@@ -1485,7 +1478,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     netlist_parser = sch_commands.add_parser("netlist", help="export schematic netlist")
     netlist_parser.add_argument("schematic", type=Path)
-    netlist_parser.add_argument("--output", type=Path, default=Path("tmp/cupwarmer-post.net"))
+    netlist_parser.add_argument("-o", "--output", type=Path, default=Path("tmp/cupwarmer-post.net"))
     netlist_parser.add_argument("--format", choices=["json", "text"], default="text")
     netlist_parser.set_defaults(func=cmd_sch_netlist)
 
@@ -1526,8 +1519,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--layers", default=None,
         help=f"comma-separated layer names (default: {DEFAULT_PCB_RENDER_LAYERS})",
     )
-    pcb_render_parser.add_argument("--output", type=Path, default=Path("tmp/pcb-region.png"))
-    pcb_render_parser.add_argument("--format", choices=["json", "text"], default="text")
+    pcb_render_parser.add_argument("-o", "--output", type=Path, default=Path("tmp/pcb-region.png"))
     pcb_render_parser.set_defaults(func=cmd_pcb_render_region)
 
     pcb_query_parser = pcb_commands.add_parser("query", help="read-only PCB queries")
@@ -1639,7 +1631,7 @@ def build_parser() -> argparse.ArgumentParser:
     import_parser.add_argument("board", type=Path)
     import_parser.add_argument("schematic", type=Path)
     import_parser.add_argument(
-        "--output", type=Path, default=None,
+        "-o", "--output", type=Path, default=None,
         help="write merged board to this path; leaves the input board untouched",
     )
     import_parser.add_argument("--dry-run", action="store_true")

@@ -1,6 +1,6 @@
 ---
 name: kicad-workflow
-description: Stage 1 (functional) workflow for editing and validating KiCad hardware design files. Owns the editing loop — `sch edit` mechanics, dry-run/apply, plan-and-approval gate with ASCII layout sketch, ERC/netlist/inspect validation, baseline diffs, and PCB DRC after board changes. Pair with `kicad-tool` for exact commands; design judgement (invariants, partitioning, decoupling) belongs to repo-local skills like `electronics-design-principles`. Score/visual cleanup (stage 2) lives in `kicad-sch-cleanup-loop`.
+description: Use when editing KiCad schematics or PCBs — adding/removing/modifying symbols, wires, labels, or footprints, or validating changes (ERC, netlist, DRC, baseline diff). Stage-1 functional workflow; pair with `kicad-tool` for commands. For visual/score polish use `kicad-sch-cleanup-loop` instead.
 ---
 
 # KiCad Workflow
@@ -77,8 +77,7 @@ Skip only if (a) the user gave an exact single action ("move R5 to 100,50"), or 
 For routine schematic edits, the one-shot validate is enough:
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/skills/kicad-tool/scripts/kicad_tool.py sch validate \
-  <top.kicad_sch> --sheet <edited-child.kicad_sch>
+kicad-tool sch validate <top.kicad_sch> --sheet <edited-child.kicad_sch>
 ```
 
 This runs ERC + netlist + `sch inspect` in order, stopping on the first failure.
@@ -87,12 +86,10 @@ For non-trivial structural edits (wire delete/replace, hierarchy changes), snaps
 
 ```bash
 # Before edit:
-python3 ${CLAUDE_PLUGIN_ROOT}/skills/kicad-tool/scripts/kicad_tool.py sch validate \
-  <top.kicad_sch> --save-baseline tmp/baseline
+kicad-tool sch validate <top.kicad_sch> --save-baseline tmp/baseline
 
 # After edit:
-python3 ${CLAUDE_PLUGIN_ROOT}/skills/kicad-tool/scripts/kicad_tool.py sch validate \
-  <top.kicad_sch> --baseline tmp/baseline
+kicad-tool sch validate <top.kicad_sch> --baseline tmp/baseline
 ```
 
 `--save-baseline DIR` writes `erc.rpt`, `netlist.net`, `inspect.json` to `DIR`. `--baseline DIR` reruns the stages and emits a JSON diff (`added_nets` / `removed_nets` / `changed_nets` / `new_erc_errors`); exits non-zero on regression (new ERC errors, removed nets, or removed nodes from existing nets).

@@ -1,6 +1,6 @@
 ---
 name: kicad-sch-cleanup-loop
-description: Iteratively improve a KiCad schematic sheet's `sch inspect` score, then tighten label/value placement. Main loop plans from a render of the user-targeted area plus a small surrounding margin, then dispatches a subagent per problem cluster in planned order. Use when the user asks to clean up, tidy, or improve the score of a sheet.
+description: Use when the user asks to clean up, tidy, beautify, or improve the layout/readability/`sch inspect` score of a KiCad schematic sheet. Stage-2 visual pass; not for connectivity changes.
 ---
 
 # KiCad Schematic Visual Cleanup Loop
@@ -16,8 +16,8 @@ Never `Read`/`cat`/`grep` the `.kicad_sch` (thousands of S-expr lines blow conte
 ## Baseline
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/skills/kicad-tool/scripts/kicad_tool.py sch validate \
-  <top> --sheet <sheet> --save-baseline tmp/cleanup-baseline > tmp/cleanup-baseline.json
+kicad-tool sch validate <top> --sheet <sheet> \
+  --save-baseline tmp/cleanup-baseline > tmp/cleanup-baseline.json
 ```
 
 Repo-root-relative paths. No `2>&1` (stderr breaks JSON). Record `score.total`, `collisions`, `symbol_wire_conflicts`.

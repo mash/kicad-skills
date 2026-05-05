@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "kicad-skills"
 version = "0.1.0"
@@ -7,3 +11,23 @@ requires-python = ">=3.11"
 dependencies = [
   "kiutils @ git+https://github.com/mash/kiutils.git@77994e0e65c3d97e3f11910fe3d05d1fc3b06fc7",
 ]
+
+[project.scripts]
+kicad-tool = "kicad_tool:main"
+
+[tool.setuptools]
+py-modules = [
+  "kicad_tool",
+  "score_schematic",
+  "kicad_sch_bbox_collisions",
+  "text_collision_core",
+  "sch_query",
+  "sch_edit",
+  "sch_netlist",
+  "pcb_query",
+  "pcb_edit",
+  "pcb_netlist",
+]
+
+[tool.setuptools.package-dir]
+"" = "skills/kicad-tool/scripts"
