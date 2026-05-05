@@ -32,7 +32,7 @@ Install once from the plugin repo root: `pip install .` (or `pip install -e .` f
 
 | Command | Purpose | Key flags |
 |---|---|---|
-| `sch render-region <sheet> <X1,Y1,X2,Y2>` | Cropped PNG of a sheet bbox (mm). Use whenever the model needs to *see* part of a schematic. | `-o/--output <path>` (default `tmp/region.png`) |
+| `sch render-region <sheet> <X1,Y1,X2,Y2>` | Cropped PNG of a sheet bbox (mm). Use whenever the model needs to *see* part of a schematic. **Take the bbox wide enough to include neighboring symbols, rails, and labels — minimum-tight bbox loses the context needed to judge layout.** | `-o/--output <path>` (default `tmp/region.png`) |
 | `sch inspect <sheet>` | Score + collisions (re-renders SVG internally) | `--only-text <regex>`, `--margin` |
 | `sch erc <top>` | ERC, hierarchical | `--report <path>` |
 | `sch netlist <top>` | Netlist export | `-o/--output <path>` |
