@@ -34,10 +34,10 @@ Install once from the plugin repo root: `pip install .` (or `pip install -e .` f
 |---|---|---|
 | `sch render-region <sheet> <X1,Y1,X2,Y2>` | Cropped PNG of a sheet bbox (mm). Use whenever the model needs to *see* part of a schematic. **Take the bbox wide enough to include neighboring symbols, rails, and labels — minimum-tight bbox loses the context needed to judge layout.** | `-o/--output <path>` (default `tmp/region.png`) |
 | `sch inspect <sheet>` | Score + collisions (re-renders SVG internally) | `--only-text <regex>`, `--margin` |
-| `sch erc <top>` | ERC, hierarchical | `--report <path>` |
+| `sch erc <top>` | ERC, hierarchical | `-o/--output <path>` |
 | `sch netlist <top>` | Netlist export | `-o/--output <path>` |
 | `sch validate <top>` | erc + netlist + inspect(--sheet) in one call | `--sheet <edited>`, `--save-baseline DIR`, `--baseline DIR` |
-| `pcb drc <board>` | PCB DRC | `--report <path>`, `--schematic-parity` |
+| `pcb drc <board>` | PCB DRC | `-o/--output <path>`, `--schematic-parity` |
 | `pcb validate <board> <top.kicad_sch>` | DRC + ref/footprint-lib parity vs schematic | `--save-baseline DIR`, `--baseline DIR` |
 | `pcb render-region <board> <X1,Y1,X2,Y2>` | Cropped PNG of the board (default agent layer set) | `--layers F.Cu,F.SilkS,...`, `-o/--output <path>` |
 | `pcb import-footprints <board> <top.kicad_sch>` | Splice missing schematic footprints onto a 5 mm staging grid; never touches existing footprints | `-o/--output <path>`, `--dry-run` |

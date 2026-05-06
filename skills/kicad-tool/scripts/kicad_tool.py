@@ -213,7 +213,7 @@ def cmd_sch_inspect(args: argparse.Namespace) -> int:
 
 
 def cmd_sch_erc(args: argparse.Namespace) -> int:
-    args.report.parent.mkdir(parents=True, exist_ok=True)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
     result = command_result(
         "sch erc",
         [
@@ -222,16 +222,16 @@ def cmd_sch_erc(args: argparse.Namespace) -> int:
             "erc",
             "--exit-code-violations",
             "--output",
-            str(args.report),
+            str(args.output),
             str(args.schematic),
         ],
     )
     if args.format == "text":
-        print(f"ERC: exit={result['returncode']} report={args.report}")
+        print(f"ERC: exit={result['returncode']} report={args.output}")
         if result["stderr"]:
             sys.stderr.write(result["stderr"])
     else:
-        print_json({"erc": result, "report": str(args.report)})
+        print_json({"erc": result, "report": str(args.output)})
     return result["returncode"]
 
 
@@ -578,18 +578,18 @@ def cmd_pcb_query_region(args: argparse.Namespace) -> int:
 
 
 def cmd_pcb_drc(args: argparse.Namespace) -> int:
-    args.report.parent.mkdir(parents=True, exist_ok=True)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
     command = [kicad_cli(), "pcb", "drc"]
     if args.schematic_parity:
         command.append("--schematic-parity")
-    command.extend(["--output", str(args.report), str(args.board)])
+    command.extend(["--output", str(args.output), str(args.board)])
     result = command_result("pcb drc", command)
     if args.format == "text":
-        print(f"DRC: exit={result['returncode']} report={args.report}")
+        print(f"DRC: exit={result['returncode']} report={args.output}")
         if result["stderr"]:
             sys.stderr.write(result["stderr"])
     else:
-        print_json({"drc": result, "report": str(args.report)})
+        print_json({"drc": result, "report": str(args.output)})
     return result["returncode"]
 
 
@@ -1495,7 +1495,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     erc_parser = sch_commands.add_parser("erc", help="run schematic ERC")
     erc_parser.add_argument("schematic", type=Path)
-    erc_parser.add_argument("--report", type=Path, default=Path("tmp/cupwarmer-erc.rpt"))
+    erc_parser.add_argument("-o", "--output", type=Path, default=Path("tmp/cupwarmer-erc.rpt"))
     erc_parser.add_argument("--format", choices=["json", "text"], default="text")
     erc_parser.set_defaults(func=cmd_sch_erc)
 
@@ -1527,7 +1527,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     drc_parser = pcb_commands.add_parser("drc", help="run PCB DRC")
     drc_parser.add_argument("board", type=Path)
-    drc_parser.add_argument("--report", type=Path, default=Path("tmp/cupwarmer-drc.rpt"))
+    drc_parser.add_argument("-o", "--output", type=Path, default=Path("tmp/cupwarmer-drc.rpt"))
     drc_parser.add_argument("--schematic-parity", action="store_true")
     drc_parser.add_argument("--format", choices=["json", "text"], default="text")
     drc_parser.set_defaults(func=cmd_pcb_drc)
