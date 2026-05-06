@@ -96,7 +96,7 @@ def _rewrite_svg_viewbox(svg_text: str, x_mm: float, y_mm: float, w_mm: float, h
     return svg_text[: match.start()] + rebuilt + svg_text[match.end():]
 
 
-PX_PER_MM = 12.0
+PX_PER_MM = 48.0
 
 
 def render_region(
@@ -481,7 +481,7 @@ def cmd_sch_validate(args: argparse.Namespace) -> int:
 
 
 DEFAULT_PCB_RENDER_LAYERS = (
-    "F.Cu,B.Cu,F.SilkS,B.SilkS,F.CrtYd,B.CrtYd,F.Fab,B.Fab,Edge.Cuts"
+    "F.Cu,B.Cu,F.SilkS,B.SilkS,F.CrtYd,B.CrtYd,Edge.Cuts"
 )
 
 
@@ -514,7 +514,7 @@ def render_pcb_region(
             "--output", str(svg_path),
             "--layers", layers,
             "--mode-single",
-            "--page-size-mode", "2",
+            "--page-size-mode", "0",
             "--exclude-drawing-sheet",
             str(board),
         ])
