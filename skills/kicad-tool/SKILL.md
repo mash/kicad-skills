@@ -17,12 +17,19 @@ kicad-tool <domain> <command> ...
 
 `KICAD_CLI` overrides the executable. Default: `/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli`.
 
-### Install
+### Bootstrap (first run)
 
-Pulls the **`kiutils` fork** (`https://github.com/mash/kiutils`, pinned in `pyproject.toml`; upstream lacks API used here). Never `pip install kiutils` — that grabs upstream and breaks the tool.
+Before any subcommand:
 
-- Full repo cloned: `pip install .` from repo root (`-e` for skill dev).
-- Only `skills/kicad-tool/` copied: `pip install "git+https://github.com/mash/kicad-skills"`.
+1. `command -v kicad-tool` — if found, skip the rest.
+2. Otherwise inspect the host's Python (`which python3`, `pipx --version`, `uv --version`, `$VIRTUAL_ENV`, PEP 668 `EXTERNALLY-MANAGED`) and pick a fitting install method. Source URL is always `git+https://github.com/mash/kicad-skills.git` — this transitively pulls the [**`kiutils` fork**](https://github.com/mash/kiutils) (pinned in `pyproject.toml`; upstream lacks API used here). **Never `pip install kiutils`** — that grabs upstream and breaks the tool. Examples — pick one, don't run blindly:
+   - `pipx install git+…` (preferred when available)
+   - `uv tool install git+…`
+   - `pip install git+…` inside an active venv
+   - Full repo cloned for skill dev: `pip install -e .` from repo root
+   - PEP 668-locked system Python: install `pipx` first instead of `--break-system-packages`
+3. Confirm with the user before touching system Python or using `--break-system-packages`.
+4. Re-check `command -v kicad-tool`. If still missing, fall back to `python3 -m kicad_tool <args>` and tell the user how to fix PATH (`pipx ensurepath`, etc.).
 
 Verify: `kicad-tool --help`.
 

@@ -16,34 +16,18 @@ Stage-1 **functional** editing process. Plans, sequences, and validates structur
 
 Stage-2 **visual** cleanup loop. Iteratively improves a schematic sheet's `sch inspect` score (collisions, wire bends, symbol clearance) without changing connectivity. Subagents edit one cluster at a time; the main loop scores and plans.
 
-## Layout
+## Install
 
-```text
-skills/
-  kicad-tool/
-  kicad-workflow/
-  kicad-sch-cleanup-loop/
+In Claude Code:
+
+```
+/plugin marketplace add mash/kicad-skills
+/plugin install kicad-skills@kicad-skills
 ```
 
-## Usage
+The skill installs the `kicad-tool` CLI itself on first use, picking the method (pipx / uv / venv pip / …) that fits your Python environment. The [`kiutils` fork](https://github.com/mash/kiutils) is pulled in transitively — never `pip install kiutils` by hand (upstream lacks API used here).
 
-Ask your coding agent to import either the whole repository or a single skill folder into its local skill/search path.
-
-Whole repository:
-
-```text
-Import https://github.com/mash/kicad-skills as local KiCad skills for this project.
-Use all skills under skills/ when working with KiCad schematic or PCB files.
-```
-
-Single skill:
-
-```text
-Import https://github.com/mash/kicad-skills/tree/main/skills/kicad-tool as a local skill.
-Use it whenever you need to query, edit, render, or validate KiCad files.
-```
-
-For agents that do not manage skills automatically, copy the desired folders under `skills/` into the agent's local skill directory. Keep each skill folder intact, including its `SKILL.md`, `agents/`, and `scripts/` files.
+To skip bootstrap, install `git+https://github.com/mash/kicad-skills.git` yourself however you like.
 
 ## Example prompts
 
@@ -145,23 +129,3 @@ Entrypoint: `kicad-tool <domain> <command> ...`. Text output by default; pass `-
 | `pcb edit footprint delete <board> <REF>` | Delete a footprint by reference |
 
 Locked footprints are refused. Only the targeted block is rewritten; UUIDs and surrounding formatting are preserved. See `skills/kicad-tool/SKILL.md` for the inspect/validate JSON shape and other details.
-
-## Dependencies
-
-The bundled scripts require the `kiutils` fork published at `https://github.com/mash/kiutils`.
-
-Your AI agent should guide you through dependency installation when it first needs to run the bundled scripts. The manual command is:
-
-```bash
-pip install .
-```
-
-This declares the kiutils fork dependency and exposes the `kicad-tool` console script.
-
-## Scope
-
-This repository intentionally contains KiCad file/tool/workflow skills only. Project-specific electrical design rules, board constraints, and product decisions should live in the consuming repository.
-
-## Status
-
-Early extraction from an active KiCad hardware workflow. APIs and skill wording may change while the plugin is being hardened.
