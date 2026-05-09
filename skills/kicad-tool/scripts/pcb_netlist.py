@@ -43,11 +43,38 @@ def parse_components(netlist_path: str | Path) -> dict[str, dict[str, Any]]:
         ref = _child_value(comp, "ref")
         if not ref:
             continue
+        sheetpath = _find_child(comp, "sheetpath")
+        sheet_names = ""
+        sheet_tstamps = ""
+        if sheetpath is not None:
+            sheet_names = _child_value(sheetpath, "names") or ""
+            sheet_tstamps = _child_value(sheetpath, "tstamps") or ""
+        # Sheetfile is exposed as a (property (name "Sheetfile") (value "...")).
+        sheetfile = ""
+        for child in comp[1:]:
+            if (
+                _is_list_with_head(child, "property")
+                and _child_value(child, "name") == "Sheetfile"
+            ):
+                sheetfile = _child_value(child, "value") or ""
+                break
+        # Component instance UUID lives at the comp's top level as
+        # (tstamps "<uuid>"). Note: there is also a (tstamps ...) inside
+        # sheetpath; we want the one OUTSIDE sheetpath.
+        comp_tstamps = ""
+        for child in comp[1:]:
+            if _is_list_with_head(child, "tstamps") and child is not sheetpath:
+                comp_tstamps = _atom_value(child[1]) if len(child) > 1 else ""
+                break
         out[ref] = {
             "ref": ref,
             "value": _child_value(comp, "value") or "",
             "footprint": _child_value(comp, "footprint") or "",
             "datasheet": _child_value(comp, "datasheet") or "",
+            "sheet_names": sheet_names,
+            "sheet_tstamps": sheet_tstamps,
+            "sheetfile": sheetfile,
+            "tstamps": comp_tstamps,
         }
     return out
 

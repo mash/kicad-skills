@@ -960,6 +960,9 @@ def _add_missing_footprints_in_memory(
             mod_text=mod_text,
             at_xy=xy,
         )
+        link_text = _link_subforms_from_comp(comp)
+        if link_text:
+            block = _inject_link_subforms(block, link_text)
         new_blocks.append(block)
         added.append({
             "ref": ref,
@@ -1140,6 +1143,110 @@ def _collect_pad_nets(text: str) -> set[str]:
 _FP_HEAD_LIBID_RE = _re.compile(r'^\(footprint\s+"([^"]*)"((?:\s+[a-z_]+)?)')
 
 
+_LINK_HEADS = ("path", "sheetname", "sheetfile")
+
+
+def _link_subforms_from_comp(comp: dict[str, Any]) -> str:
+    """Build the ``(path ...)`` / ``(sheetname ...)`` / ``(sheetfile ...)``
+    text block for a footprint, derived from netlist comp metadata. Returns ""
+    if the comp is missing any of the required identifiers (linkage cannot be
+    constructed, e.g. for hand-drawn netlists)."""
+    sheet_tstamps = comp.get("sheet_tstamps", "") or ""
+    comp_tstamps = comp.get("tstamps", "") or ""
+    sheet_names = comp.get("sheet_names", "") or ""
+    sheetfile = comp.get("sheetfile", "") or ""
+    if not (sheet_tstamps and comp_tstamps and sheet_names and sheetfile):
+        return ""
+    # KiCad's path field concatenates sheetpath/tstamps (already contains
+    # leading + trailing slashes) with the component's tstamps. Guard against
+    # a malformed sheet_tstamps that lacks the trailing slash.
+    sep = "" if sheet_tstamps.endswith("/") else "/"
+    path_val = f"{sheet_tstamps}{sep}{comp_tstamps}"
+    return (
+        f'\t\t(path "{path_val}")\n'
+        f'\t\t(sheetname "{sheet_names}")\n'
+        f'\t\t(sheetfile "{sheetfile}")\n'
+    )
+
+
+def _extract_link_subforms(block: str) -> str:
+    """Return the concatenated text of (path ...), (sheetname ...), and
+    (sheetfile ...) top-level subforms of a footprint block, with a trailing
+    newline after each. These fields link a placed footprint to the matching
+    schematic instance; they must be carried across when the footprint is
+    rebuilt from a .kicad_mod template (e.g. during a lib_id swap), otherwise
+    KiCad treats the footprint as orphaned and re-adds it from the schematic.
+    """
+    body_start = _footprint_head_end(block)
+    chunks: list[str] = []
+    for head, open_idx, end_idx in _iter_subforms(block, body_start):
+        if head in _LINK_HEADS:
+            # Include the leading indent (tabs/spaces) of the subform's line so
+            # the re-injected block keeps consistent indentation.
+            line_start = block.rfind("\n", 0, open_idx) + 1
+            chunks.append(block[line_start:end_idx] + "\n")
+    return "".join(chunks)
+
+
+def _inject_link_subforms(new_block: str, link_text: str) -> str:
+    """Insert link_text (path/sheetname/sheetfile lines) into new_block right
+    after the last (property ...) subform. If new_block already has any of
+    these subforms, returns new_block unchanged.
+    """
+    if not link_text:
+        return new_block
+    # _build_footprint_block emits a leading tab so the splice lines up with
+    # surrounding pcb subforms; _footprint_head_end expects the head at
+    # offset 0, so locate the actual "(footprint" first.
+    fp_off = new_block.find("(footprint")
+    if fp_off < 0:
+        return new_block
+    inner = new_block[fp_off:]
+    body_start_inner = _footprint_head_end(inner)
+    body_start = fp_off + body_start_inner
+    last_prop_end = -1
+    for head, open_idx, end_idx in _iter_subforms(new_block, body_start):
+        if head in _LINK_HEADS:
+            return new_block
+        if head == "property":
+            last_prop_end = end_idx
+    if last_prop_end < 0:
+        return new_block
+    # Step past the trailing newline after the last property line so the
+    # injected block lines up with the surrounding subform indentation.
+    insert_at = last_prop_end
+    if insert_at < len(new_block) and new_block[insert_at] == "\n":
+        insert_at += 1
+    return new_block[:insert_at] + link_text + new_block[insert_at:]
+
+
+def _remove_link_subforms(block: str) -> str:
+    """Drop any (path ...) / (sheetname ...) / (sheetfile ...) top-level
+    subforms from a footprint block. Used together with _inject_link_subforms
+    to re-set the link to a canonical value."""
+    fp_off = block.find("(footprint")
+    if fp_off < 0:
+        return block
+    inner_start = fp_off + _footprint_head_end(block[fp_off:])
+    spans: list[tuple[int, int]] = []
+    for head, open_idx, end_idx in _iter_subforms(block, inner_start):
+        if head in _LINK_HEADS:
+            line_start = block.rfind("\n", 0, open_idx) + 1
+            line_end = end_idx
+            if line_end < len(block) and block[line_end] == "\n":
+                line_end += 1
+            spans.append((line_start, line_end))
+    if not spans:
+        return block
+    out: list[str] = []
+    cursor = 0
+    for s, e in spans:
+        out.append(block[cursor:s])
+        cursor = e
+    out.append(block[cursor:])
+    return "".join(out)
+
+
 def _swap_footprint_libs_in_memory(
     text: str,
     components: dict[str, dict[str, Any]],
@@ -1232,6 +1339,15 @@ def _swap_footprint_libs_in_memory(
             new_block = _flip_layer_strings_in_block(new_block)
             new_block = _mirror_geometry_subforms(new_block)
 
+        # Carry over the schematic-link subforms (path / sheetname / sheetfile)
+        # from the existing footprint. _build_footprint_block synthesises a
+        # fresh block from the .kicad_mod template, which has none of these.
+        # Fall back to deriving them from the netlist when the existing block
+        # is missing them (e.g. legacy boards), so a swap also retrofits the
+        # link instead of just preserving its absence.
+        link_text = _extract_link_subforms(block) or _link_subforms_from_comp(comp)
+        new_block = _inject_link_subforms(new_block, link_text)
+
         # The existing block sits after a leading tab at open_idx-1; the new
         # block from _reindent_footprint_block already starts with that tab.
         # Splice over the leading tab as well so we don't double-indent.
@@ -1297,6 +1413,7 @@ def sync_from_schematic(
 
     pad_net_changes: list[dict[str, str]] = []
     pad_net_added: list[dict[str, str]] = []
+    link_retrofitted: list[dict[str, str]] = []
 
     # Walk every footprint block, rebuild it with rewritten pad nets.
     out_chunks: list[str] = []
@@ -1332,6 +1449,23 @@ def sync_from_schematic(
         new_fp_chunks.append(fp_block[fp_cursor:])
         new_fp_block = "".join(new_fp_chunks)
 
+        # Retrofit / canonicalise the schematic-link subforms (path /
+        # sheetname / sheetfile). Older boards (and footprints added by
+        # earlier versions of pcb sync) may be missing these; without them
+        # KiCad treats the footprint as orphaned and "Update PCB from
+        # Schematic" re-adds a duplicate.
+        comp = components.get(ref)
+        if comp is not None:
+            expected_link = _link_subforms_from_comp(comp)
+            current_link = _extract_link_subforms(new_fp_block)
+            if expected_link and expected_link != current_link:
+                cleaned = _remove_link_subforms(new_fp_block)
+                new_fp_block = _inject_link_subforms(cleaned, expected_link)
+                link_retrofitted.append({
+                    "ref": ref,
+                    "had_link": "yes" if current_link else "no",
+                })
+
         out_chunks.append(after_swap_text[cursor:open_idx])
         out_chunks.append(new_fp_block)
         cursor = end_idx
@@ -1362,6 +1496,7 @@ def sync_from_schematic(
     details["swap_skipped"] = swap_summary["swap_skipped"]
     details["pad_net_changes"] = pad_net_changes
     details["pad_net_added"] = pad_net_added
+    details["link_retrofitted"] = link_retrofitted
     details["orphaned_nets"] = orphaned_nets
 
     return {
