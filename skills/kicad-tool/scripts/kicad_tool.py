@@ -992,55 +992,95 @@ def _emit_query(args: argparse.Namespace, payload: dict[str, Any]) -> int:
 
 
 def _format_query_text(payload: dict[str, Any]) -> None:
-    """Emit a compact text summary of a query payload.
+    """Emit a YAML-like text rendering of a query payload.
 
-    Heuristic: print top-level scalars as 'key: value' lines, and list-of-dicts
-    fields ('items', 'results', 'members', 'pins', 'pads', 'symbols',
-    'footprints', 'wires', 'labels', 'junctions', 'nets', 'tracks', 'vias',
-    'zones', 'drawings') as 'count: N' followed by up to 30 brief lines. Fall
-    back to JSON for anything else so callers always get usable data.
+    Same content as ``--format json``, just laid out for human reading: scalars
+    as ``key: value``, dicts indented, lists as ``- `` blocks. No truncation,
+    no JSON fallback — text and JSON carry identical information.
     """
-    list_keys = (
-        "items", "results", "members", "pins", "pads",
-        "symbols", "footprints", "wires", "labels", "junctions",
-        "nets", "tracks", "vias", "zones", "drawings",
-    )
-    scalars: list[tuple[str, Any]] = []
-    list_field: tuple[str, list[Any]] | None = None
-    rich_remainder: dict[str, Any] = {}
-    for k, v in payload.items():
-        if isinstance(v, (str, int, float, bool)) or v is None:
-            scalars.append((k, v))
-        elif isinstance(v, list) and v and all(isinstance(x, dict) for x in v) and k in list_keys and list_field is None:
-            list_field = (k, v)
-        else:
-            rich_remainder[k] = v
-    for k, v in scalars:
-        print(f"{k}: {v}")
-    if list_field is not None:
-        k, items = list_field
-        print(f"{k}: {len(items)}")
-        for item in items[:30]:
-            label = (
-                item.get("ref")
-                or item.get("name")
-                or item.get("uuid")
-                or item.get("id")
-                or ""
-            )
-            extras = {kk: vv for kk, vv in item.items()
-                      if kk not in {"ref", "name", "uuid", "id"}
-                      and isinstance(vv, (str, int, float, bool))}
-            extras_str = " ".join(f"{kk}={vv}" for kk, vv in list(extras.items())[:4])
-            line = f"- {label}".rstrip()
-            if extras_str:
-                line = f"{line}  {extras_str}" if label else f"- {extras_str}"
-            print(line)
-        if len(items) > 30:
-            print(f"... ({len(items) - 30} more; use --format json for full list)")
-    if rich_remainder:
-        print("--- (remainder as JSON; pass --format json for full payload) ---")
-        print(json.dumps(rich_remainder, ensure_ascii=False, indent=2))
+    for line in _format_value_lines(payload, indent=0, top_level=True):
+        print(line)
+
+
+def _format_scalar(v: Any) -> str:
+    if v is None:
+        return "null"
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    return str(v)
+
+
+def _format_value_lines(value: Any, indent: int, top_level: bool = False) -> list[str]:
+    pad = "  " * indent
+    lines: list[str] = []
+    if isinstance(value, dict):
+        if not value:
+            return [f"{pad}{{}}"] if not top_level else []
+        for k, v in value.items():
+            if isinstance(v, (str, int, float, bool)) or v is None:
+                lines.append(f"{pad}{k}: {_format_scalar(v)}")
+            elif isinstance(v, list):
+                if not v:
+                    lines.append(f"{pad}{k}: []")
+                elif all(isinstance(x, (str, int, float, bool)) or x is None for x in v):
+                    lines.append(f"{pad}{k}: [{', '.join(_format_scalar(x) for x in v)}]")
+                else:
+                    lines.append(f"{pad}{k}:")
+                    for item in v:
+                        lines.extend(_format_list_item_lines(item, indent + 1))
+            elif isinstance(v, dict):
+                if not v:
+                    lines.append(f"{pad}{k}: {{}}")
+                else:
+                    lines.append(f"{pad}{k}:")
+                    lines.extend(_format_value_lines(v, indent + 1))
+            else:
+                lines.append(f"{pad}{k}: {_format_scalar(v)}")
+        return lines
+    if isinstance(value, list):
+        if not value:
+            return [f"{pad}[]"]
+        for item in value:
+            lines.extend(_format_list_item_lines(item, indent))
+        return lines
+    return [f"{pad}{_format_scalar(value)}"]
+
+
+def _format_list_item_lines(item: Any, indent: int) -> list[str]:
+    pad = "  " * indent
+    if isinstance(item, (str, int, float, bool)) or item is None:
+        return [f"{pad}- {_format_scalar(item)}"]
+    if isinstance(item, dict):
+        if not item:
+            return [f"{pad}- {{}}"]
+        lines: list[str] = []
+        first = True
+        for k, v in item.items():
+            prefix = f"{pad}- " if first else f"{pad}  "
+            first = False
+            if isinstance(v, (str, int, float, bool)) or v is None:
+                lines.append(f"{prefix}{k}: {_format_scalar(v)}")
+            elif isinstance(v, list):
+                if not v:
+                    lines.append(f"{prefix}{k}: []")
+                elif all(isinstance(x, (str, int, float, bool)) or x is None for x in v):
+                    lines.append(f"{prefix}{k}: [{', '.join(_format_scalar(x) for x in v)}]")
+                else:
+                    lines.append(f"{prefix}{k}:")
+                    for sub in v:
+                        lines.extend(_format_list_item_lines(sub, indent + 2))
+            elif isinstance(v, dict):
+                if not v:
+                    lines.append(f"{prefix}{k}: {{}}")
+                else:
+                    lines.append(f"{prefix}{k}:")
+                    lines.extend(_format_value_lines(v, indent + 2))
+            else:
+                lines.append(f"{prefix}{k}: {_format_scalar(v)}")
+        return lines
+    if isinstance(item, list):
+        return [f"{pad}- "] + _format_value_lines(item, indent + 1)
+    return [f"{pad}- {_format_scalar(item)}"]
 
 
 def cmd_sch_query_symbol(args: argparse.Namespace) -> int:
@@ -1438,7 +1478,7 @@ def _add_edit_subparsers(sch_commands) -> None:
 
     p = wire_act.add_parser("delete", help="delete a wire by uuid")
     p.add_argument("schematic", type=Path)
-    p.add_argument("--uuid", required=True)
+    p.add_argument("uuid", help="wire uuid")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--format", choices=["json", "text"], default="text")
     p.set_defaults(func=cmd_sch_edit_wire_delete)
@@ -1484,7 +1524,7 @@ def _add_edit_subparsers(sch_commands) -> None:
 
     p = junc_act.add_parser("delete", help="delete a junction by uuid")
     p.add_argument("schematic", type=Path)
-    p.add_argument("--uuid", required=True)
+    p.add_argument("uuid", help="junction uuid")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--format", choices=["json", "text"], default="text")
     p.set_defaults(func=cmd_sch_edit_junction_delete)

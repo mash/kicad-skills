@@ -31,7 +31,7 @@ Verify: `kicad-tool --help`.
 - `<schematic>` is always the first positional. Required args are positional in table order.
 - Coordinates are a single `X,Y` (bbox: `X1,Y1,X2,Y2`); rotation is `--rotation R`.
 - `--flag` only for optional knobs, mutex selectors (e.g. `--uuid` vs `--at` vs `--through` for `sch query wire`), and the universal `--dry-run` (edits) / `--format {json,text}` (all).
-- **Output is text by default for every command.** Pass `--format json` for the structured payload.
+- **Output is text by default for every command.** Text and `--format json` carry **identical information** (text is YAML-like, JSON is JSON). Use `--format json` **only when piping to `jq` / a script**; for plain reading, stick with text.
 - **On runtime failure** the tool prints the offending subcommand's `usage:` line to stderr after the error message. Read the error tail; do **not** invoke `--help` separately.
 - **Do not invent flags for required args.** `--bbox`, `--ref`, `--symbol` etc. do not exist.
 
@@ -51,7 +51,7 @@ Verify: `kicad-tool --help`.
 
 ### Query (read-only)
 
-Positional `<schematic.kicad_sch>`. Text summary by default; `--format json` for the full payload.
+Positional `<schematic.kicad_sch>`. Text by default; `--format json` only when piping to `jq`. Same content either way.
 
 | Command | Purpose |
 |---|---|
@@ -61,7 +61,7 @@ Positional `<schematic.kicad_sch>`. Text summary by default; `--format json` for
 | `sch query region <sch> <X1,Y1,X2,Y2>` | All elements inside a bbox |
 | `sch query wire <sch> (--uuid U \| --at X,Y \| --through X,Y)` | Locate a wire |
 | `sch query label <sch> (--name N \| --uuid U)` | Locate labels |
-| `sch query lib-symbol <sch> <LIB_ID>` | Library symbol pins/units |
+| `sch query lib-symbol <sch> <LIB_ID>` | Library symbol pins/units (large; prefer `query symbol <REF>` if a placed instance exists) |
 | `sch query list <sch> <KIND> [--netlist PATH]` | KIND ∈ symbols/labels/wires/junctions/nets (`nets` requires `--netlist`) |
 
 PCB equivalents (same shape):
@@ -87,12 +87,12 @@ Positional `<schematic.kicad_sch>` / `<board.kicad_pcb>`. Text summary by defaul
 | `sch edit symbol set-property <sch> <REF> <KEY> <VALUE>` | Set any property (built-in or user-defined: MPN/LCSC/Manufacturer/...) |
 | `sch edit symbol set-attribute <sch> <REF> <in_bom\|on_board> <yes\|no>` | Set a schematic symbol boolean attribute; use `on_board no` for off-board BOM parts |
 | `sch edit wire add <sch> <X1,Y1> <X2,Y2> [--type solid\|default]` | Add a wire segment |
-| `sch edit wire delete <sch> --uuid U` | Delete a wire |
+| `sch edit wire delete <sch> <UUID>` | Delete a wire |
 | `sch edit label add <sch> <KIND> <NAME> <X,Y> [--rotation R]` | KIND ∈ global/hier/local |
 | `sch edit label move <sch> <UUID> <X,Y> [--rotation R]` | Move a label |
 | `sch edit label delete <sch> <UUID>` | Delete a label |
 | `sch edit junction add <sch> <X,Y>` | Add a junction |
-| `sch edit junction delete <sch> --uuid U` | Delete a junction |
+| `sch edit junction delete <sch> <UUID>` | Delete a junction |
 | `pcb edit footprint move <board> <REF> <X,Y> [--rotation R]` | Move/rotate a footprint |
 | `pcb edit footprint move-property <board> <REF> <KEY> <X,Y> [--rotation R]` | Move a property field |
 | `pcb edit footprint set-property <board> <REF> <KEY> <VALUE>` | Set a property (refuses `Reference` — use schematic + `pcb import-footprints`) |
