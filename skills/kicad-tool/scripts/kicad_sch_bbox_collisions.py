@@ -196,6 +196,10 @@ def collect_text_targets(sch: Schematic) -> list[TextTarget]:
     targets: list[TextTarget] = []
     for gl in sch.globalLabels:
         targets.append(TextTarget(text=gl.text, kind="global_label", expected_x=gl.position.X, expected_y=gl.position.Y, angle=int(gl.position.angle or 0)))
+    for lab in getattr(sch, "labels", []) or []:
+        targets.append(TextTarget(text=lab.text, kind="label", expected_x=lab.position.X, expected_y=lab.position.Y, angle=int(lab.position.angle or 0)))
+    for hl in getattr(sch, "hierarchicalLabels", []) or []:
+        targets.append(TextTarget(text=hl.text, kind="hierarchical_label", expected_x=hl.position.X, expected_y=hl.position.Y, angle=int(hl.position.angle or 0)))
     for sym in sch.schematicSymbols:
         ref = next((p.value for p in sym.properties if p.key == "Reference"), None)
         for prop in sym.properties:
@@ -239,9 +243,11 @@ def match_rendered_to_targets(rendered: list[RenderedText], targets: list[TextTa
     for text, text_targets in targets_by_text.items():
         text_rendered = rendered_by_text.get(text, [])
         kinds = {target.kind for target in text_targets}
-        if kinds == {"global_label"}:
+        framed_kinds = {"global_label", "hierarchical_label"}
+        unframed_kinds = {"property", "label"}
+        if kinds <= framed_kinds:
             text_rendered = [rt for rt in text_rendered if rt.frame_bbox is not None]
-        elif kinds == {"property"}:
+        elif kinds <= unframed_kinds:
             text_rendered = [rt for rt in text_rendered if rt.frame_bbox is None]
         if not text_rendered:
             continue
