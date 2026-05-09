@@ -800,6 +800,71 @@ def set_symbol_property(
     }
 
 
+def set_symbol_attribute(
+    sch_path: str | Path,
+    ref: str,
+    attribute: str,
+    value: str,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Set a symbol-level boolean attribute such as ``in_bom`` or ``on_board``.
+
+    KiCad stores these as direct children of the schematic ``(symbol ...)`` block,
+    not as ``(property ...)`` fields.  Per the schematic file format, both tokens
+    take only ``yes`` or ``no``.
+    """
+    allowed_attributes = {"in_bom", "on_board"}
+    if attribute not in allowed_attributes:
+        raise ValueError(
+            f"attribute must be one of {sorted(allowed_attributes)}, got {attribute!r}"
+        )
+    if value not in {"yes", "no"}:
+        raise ValueError(f"value must be 'yes' or 'no', got {value!r}")
+
+    sch_path = Path(sch_path)
+    text = _read(sch_path)
+
+    found = _find_symbol_block_by_ref(text, ref)
+    if not found:
+        raise ValueError(f"symbol with reference {ref!r} not found in {sch_path}")
+    open_idx, end_idx, block = found
+
+    attr_re = re.compile(r"(\(" + re.escape(attribute) + r"\s+)(yes|no)(\s*\))")
+    matches = list(attr_re.finditer(block))
+    if len(matches) > 1:
+        raise ValueError(f"duplicate symbol attribute {attribute!r} on symbol {ref!r}")
+
+    old_value: str | None = None
+    if matches:
+        m = matches[0]
+        old_value = m.group(2)
+        new_block = block[: m.start(2)] + value + block[m.end(2) :]
+    else:
+        unit_re = re.compile(r"^(\t\t\(unit\s+\d+\)\n)", flags=re.MULTILINE)
+        m_unit = unit_re.search(block)
+        if not m_unit:
+            raise ValueError(
+                f"symbol {ref!r} has no existing ({attribute} yes|no) token "
+                "and no (unit ...) anchor to insert after"
+            )
+        insert_at = m_unit.end()
+        new_block = block[:insert_at] + f"\t\t({attribute} {value})\n" + block[insert_at:]
+
+    new_text = text[:open_idx] + new_block + text[end_idx:]
+    changed = _maybe_write(sch_path, text, new_text, dry_run)
+    return {
+        "action": "set_symbol_attribute",
+        "changed": changed,
+        "diff": _diff(text, new_text, sch_path),
+        "details": {
+            "ref": ref,
+            "attribute": attribute,
+            "old_value": old_value,
+            "new_value": value,
+        },
+    }
+
+
 def move_symbol_property(
     sch_path: str | Path,
     ref: str,
@@ -1317,6 +1382,7 @@ __all__ = [
     "delete_symbol",
     "add_symbol",
     "set_symbol_property",
+    "set_symbol_attribute",
     "move_symbol_property",
     "add_wire",
     "delete_wire",

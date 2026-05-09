@@ -1184,6 +1184,17 @@ def cmd_sch_edit_symbol_set_property(args: argparse.Namespace) -> int:
     return _emit_edit(args, res)
 
 
+def cmd_sch_edit_symbol_set_attribute(args: argparse.Namespace) -> int:
+    res = sch_edit.set_symbol_attribute(
+        args.schematic,
+        args.ref,
+        args.attribute,
+        args.value,
+        dry_run=args.dry_run,
+    )
+    return _emit_edit(args, res)
+
+
 def cmd_sch_edit_wire_add(args: argparse.Namespace) -> int:
     res = sch_edit.add_wire(
         args.schematic,
@@ -1400,6 +1411,18 @@ def _add_edit_subparsers(sch_commands) -> None:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--format", choices=["json", "text"], default="text")
     p.set_defaults(func=cmd_sch_edit_symbol_set_property)
+
+    p = sym_act.add_parser(
+        "set-attribute",
+        help="set a symbol boolean attribute (in_bom/on_board)",
+    )
+    p.add_argument("schematic", type=Path)
+    p.add_argument("ref", help="symbol reference, e.g. F1")
+    p.add_argument("attribute", choices=["in_bom", "on_board"])
+    p.add_argument("value", choices=["yes", "no"])
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--format", choices=["json", "text"], default="text")
+    p.set_defaults(func=cmd_sch_edit_symbol_set_attribute)
 
     # wire
     wire = esub.add_parser("wire", help="edit wires")

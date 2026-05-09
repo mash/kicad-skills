@@ -78,6 +78,7 @@ Positional `<schematic.kicad_sch>` / `<board.kicad_pcb>`. Text summary by defaul
 | `sch edit symbol add-pin <sch> <LIB_ID> <NUMBER> <NAME> <X,Y> --length L --type T [--rotation R] [--shape S] [--lib-file PATH]` | Add a pin (updates embedded lib_symbols + `.kicad_sym`) |
 | `sch edit symbol delete <sch> <REF>` | Delete a symbol; reports connected taps but does **not** remove them |
 | `sch edit symbol set-property <sch> <REF> <KEY> <VALUE>` | Set any property (built-in or user-defined: MPN/LCSC/Manufacturer/...) |
+| `sch edit symbol set-attribute <sch> <REF> <in_bom\|on_board> <yes\|no>` | Set a schematic symbol boolean attribute; use `on_board no` for off-board BOM parts |
 | `sch edit wire add <sch> <X1,Y1> <X2,Y2> [--type solid\|default]` | Add a wire segment |
 | `sch edit wire delete <sch> --uuid U` | Delete a wire |
 | `sch edit label add <sch> <KIND> <NAME> <X,Y> [--rotation R]` | KIND ∈ global/hier/local |
