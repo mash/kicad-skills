@@ -122,7 +122,7 @@ Entrypoint: `kicad-tool <domain> <command> ...`. Text output by default; pass `-
 | `pcb drc <board>` | PCB DRC; `-o/--output`, `--schematic-parity` |
 | `pcb validate <board> <top.kicad_sch>` | DRC + ref/footprint-lib parity vs schematic; `--save-baseline DIR`, `--baseline DIR` |
 | `pcb render-region <board> <X1,Y1,X2,Y2>` | Cropped PNG (default agent layer set); `--layers F.Cu,F.SilkS,...`, `-o/--output` |
-| `pcb import-footprints <board> <top.kicad_sch>` | Splice missing schematic footprints onto a 5 mm staging grid; never touches existing footprints; `-o/--output`, `--dry-run` |
+| `pcb sync <board> <top.kicad_sch>` | Add missing footprints (5 mm staging grid) AND update each pad's `(net "...")` to match the schematic netlist; idempotent; tracks/vias/zones are not touched — orphaned net names are reported; `-o/--output`, `--dry-run` |
 
 ### PCB — query (read-only)
 
@@ -140,7 +140,7 @@ Entrypoint: `kicad-tool <domain> <command> ...`. Text output by default; pass `-
 |---|---|
 | `pcb edit footprint move <board> <REF> <X,Y> [--rotation R]` | Move/rotate a footprint |
 | `pcb edit footprint move-property <board> <REF> <KEY> <X,Y> [--rotation R]` | Move a property field |
-| `pcb edit footprint set-property <board> <REF> <KEY> <VALUE>` | Set a property (refuses `Reference` — use schematic + `pcb import-footprints`) |
+| `pcb edit footprint set-property <board> <REF> <KEY> <VALUE>` | Set a property (refuses `Reference` — use schematic + `pcb sync`) |
 | `pcb edit footprint move-layer <board> <REF> front\|back [--at X,Y] [--rotation R]` | Flip to F.Cu / B.Cu (mirrors geometry, preserves property positions) |
 | `pcb edit footprint delete <board> <REF>` | Delete a footprint by reference |
 

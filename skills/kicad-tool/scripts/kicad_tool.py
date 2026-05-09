@@ -654,7 +654,7 @@ def cmd_pcb_edit_footprint_delete(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
-# pcb import-footprints / pcb validate
+# pcb sync / pcb validate
 # ---------------------------------------------------------------------------
 
 
@@ -671,14 +671,14 @@ def _export_sch_netlist(schematic: Path, out: Path) -> dict[str, Any]:
     )
 
 
-def cmd_pcb_import_footprints(args: argparse.Namespace) -> int:
-    netlist_out = Path("tmp/pcb-import-netlist.net")
+def cmd_pcb_sync(args: argparse.Namespace) -> int:
+    netlist_out = Path("tmp/pcb-sync-netlist.net")
     nl = _export_sch_netlist(args.schematic, netlist_out)
     if nl["returncode"] != 0:
         sys.stderr.write(nl.get("stderr") or "")
         return nl["returncode"]
 
-    res = pcb_edit.import_footprints(
+    res = pcb_edit.sync_from_schematic(
         args.board,
         netlist_out,
         project_dir=args.board.parent,
@@ -687,8 +687,6 @@ def cmd_pcb_import_footprints(args: argparse.Namespace) -> int:
     )
 
     if args.format != "text":
-        # Strip the diff body out of the JSON top-level; surface it on stderr
-        # only on dry-run to mirror sch edit semantics.
         payload = {k: v for k, v in res.items() if k != "diff"}
         print_json(payload)
         if args.dry_run and res.get("diff"):
@@ -697,12 +695,32 @@ def cmd_pcb_import_footprints(args: argparse.Namespace) -> int:
         print(f"action: {res['action']}")
         print(f"changed: {res['changed']}  wrote: {res['wrote']}  target: {res['target']}")
         d = res["details"]
-        print(f"schematic_refs={d['schematic_refs']} existing={d['existing_refs']} added={len(d['added'])}")
+        print(
+            f"schematic_refs={d['schematic_refs']} existing={d['existing_refs']} "
+            f"added={len(d['added'])} pad_net_changes={len(d['pad_net_changes'])} "
+            f"pad_net_added={len(d['pad_net_added'])}"
+        )
+        print(
+            f"swapped={len(d.get('swapped', []))} "
+            f"swap_skipped={len(d.get('swap_skipped', []))}"
+        )
+        if d.get("swapped"):
+            for s in d["swapped"]:
+                print(f"  swap {s['ref']}: {s['old_lib_id']} -> {s['new_lib_id']}")
+        if d.get("swap_skipped"):
+            for s in d["swap_skipped"]:
+                print(f"  swap-skip {s['ref']} ({s['reason']})")
         if d["unresolved"]:
             print(f"unresolved: {d['unresolved']}")
         if d["skipped_no_footprint"]:
             print(f"skipped (no footprint assigned): {d['skipped_no_footprint']}")
-        print(f"parity.clean={d['parity']['clean']} missing_on_board={d['parity']['missing_on_board']}")
+        print(
+            f"parity.clean={d['parity']['clean']} "
+            f"missing_on_board={d['parity']['missing_on_board']} "
+            f"extra_on_board={d['parity']['extra_on_board']}"
+        )
+        if d["orphaned_nets"]:
+            print(f"orphaned_nets: {d['orphaned_nets']}")
         if args.dry_run and res.get("diff"):
             sys.stdout.write(res["diff"])
     parity_clean = res["details"]["parity"]["clean"]
@@ -1709,20 +1727,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--format", choices=["json", "text"], default="text")
     p.set_defaults(func=cmd_pcb_edit_footprint_delete)
 
-    # pcb import-footprints
-    import_parser = pcb_commands.add_parser(
-        "import-footprints",
-        help="add missing schematic footprints to a board with deterministic staging",
+    # pcb sync
+    sync_parser = pcb_commands.add_parser(
+        "sync",
+        help="add missing footprints AND update each pad's (net ...) to match the schematic netlist; idempotent",
     )
-    import_parser.add_argument("board", type=Path)
-    import_parser.add_argument("schematic", type=Path)
-    import_parser.add_argument(
+    sync_parser.add_argument("board", type=Path)
+    sync_parser.add_argument("schematic", type=Path)
+    sync_parser.add_argument(
         "-o", "--output", type=Path, default=None,
-        help="write merged board to this path; leaves the input board untouched",
+        help="write synced board to this path; leaves the input board untouched",
     )
-    import_parser.add_argument("--dry-run", action="store_true")
-    import_parser.add_argument("--format", choices=["json", "text"], default="text")
-    import_parser.set_defaults(func=cmd_pcb_import_footprints)
+    sync_parser.add_argument("--dry-run", action="store_true")
+    sync_parser.add_argument("--format", choices=["json", "text"], default="text")
+    sync_parser.set_defaults(func=cmd_pcb_sync)
 
     # pcb validate
     pcb_validate_parser = pcb_commands.add_parser(

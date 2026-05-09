@@ -415,7 +415,7 @@ def set_footprint_property(
     pcb_path = Path(pcb_path)
     if key == "Reference":
         raise KeyError(
-            "set Reference via the schematic + 'pcb import-footprints' instead "
+            "set Reference via the schematic + 'pcb sync' instead "
             "of editing the board directly"
         )
     text = _read(pcb_path)
@@ -716,7 +716,7 @@ def move_footprint_layer(
 # This guarantees:
 #   * staged footprints never overlap an existing user-placed footprint inside
 #     the floorplan
-#   * re-running ``import-footprints`` is a no-op (same refs hash to the same
+#   * re-running ``pcb sync`` is a no-op (same refs hash to the same
 #     slot, but they are already present so they are skipped)
 #   * the staging slot for a given ref is stable across runs / output paths
 
@@ -819,6 +819,7 @@ def _build_footprint_block(
     lib_id: str,
     mod_text: str,
     at_xy: tuple[float, float],
+    rotation: float = 0.0,
 ) -> str:
     """Build a placed-footprint block from a .kicad_mod source.
 
@@ -868,7 +869,7 @@ def _build_footprint_block(
         )
 
     # 4. Insert (at X Y 0) right after the (uuid ...) line at indent depth 1.
-    new_at = f'\t(at {_fmt_coord(at_xy[0])} {_fmt_coord(at_xy[1])} 0)\n'
+    new_at = f'\t(at {_fmt_coord(at_xy[0])} {_fmt_coord(at_xy[1])} {_fmt_coord(rotation)})\n'
     text = _re.sub(
         r'(^\t\(uuid\s+"[^"]+"\)\n)',
         r'\1' + new_at,
@@ -919,36 +920,18 @@ def _build_footprint_block(
     return text
 
 
-def import_footprints(
-    pcb_path: str | Path,
-    schematic_netlist_path: str | Path,
-    *,
-    project_dir: str | Path | None = None,
-    output_path: str | Path | None = None,
-    dry_run: bool = False,
-) -> dict[str, Any]:
-    """Add missing schematic footprints to a board.
-
-    Existing footprints (and their placement) are preserved. New footprints are
-    appended just before the closing ``)`` of the ``(kicad_pcb ...)`` form, on
-    a deterministic staging grid outside the floorplan.
-
-    With ``output_path`` set, the input ``pcb_path`` is left untouched and the
-    new content is written to ``output_path``. Without ``output_path`` the
-    write is in place. ``dry_run`` skips writes entirely.
-    """
-    # Local import keeps pcb_edit usable without the netlist module on read
-    # paths that don't need import functionality.
+def _add_missing_footprints_in_memory(
+    text: str,
+    pcb_path: Path,
+    schematic_netlist_path: Path,
+    project_dir: Path,
+) -> tuple[str, dict[str, Any]]:
+    """Pure in-memory: take board text + schematic netlist, return updated text
+    plus a summary dict of additions. No I/O on the board file itself."""
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import pcb_netlist  # noqa: WPS433
 
-    pcb_path = Path(pcb_path)
-    schematic_netlist_path = Path(schematic_netlist_path)
-    project_dir = Path(project_dir) if project_dir is not None else pcb_path.parent
-
-    text = _read(pcb_path)
     existing = _existing_refs(text)
-
     components = pcb_netlist.parse_components(schematic_netlist_path)
     sch_refs = sorted(components.keys(), key=_ref_sort_key)
 
@@ -986,9 +969,7 @@ def import_footprints(
             "source": str(mod_path),
         })
 
-    # Insertion: just before the final `)` (the close of `(kicad_pcb ...)`).
     if new_blocks:
-        # Find the final closing paren of the file.
         m = _re.search(r"\)\s*\Z", text)
         if not m:
             raise ValueError("could not locate closing paren of kicad_pcb form")
@@ -996,6 +977,58 @@ def import_footprints(
         new_text = text[:insert_at] + "".join(new_blocks) + text[insert_at:]
     else:
         new_text = text
+
+    after_refs = _existing_refs(new_text)
+    parity_missing = sorted(set(sch_refs) - after_refs, key=_ref_sort_key)
+    parity_extra = sorted(after_refs - set(sch_refs), key=_ref_sort_key)
+    parity_clean = not parity_missing and not unresolved
+
+    summary = {
+        "schematic_refs": len(sch_refs),
+        "existing_refs": len(existing),
+        "added": added,
+        "skipped_no_footprint": skipped_no_footprint,
+        "unresolved": unresolved,
+        "staging": {
+            "origin": [STAGING_ORIGIN_X, STAGING_ORIGIN_Y],
+            "pitch": STAGING_PITCH,
+            "cols": STAGING_COLS,
+        },
+        "parity": {
+            "clean": parity_clean,
+            "missing_on_board": parity_missing,
+            "extra_on_board": parity_extra,
+        },
+    }
+    return new_text, summary
+
+
+def import_footprints(
+    pcb_path: str | Path,
+    schematic_netlist_path: str | Path,
+    *,
+    project_dir: str | Path | None = None,
+    output_path: str | Path | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Add missing schematic footprints to a board.
+
+    Existing footprints (and their placement) are preserved. New footprints are
+    appended just before the closing ``)`` of the ``(kicad_pcb ...)`` form, on
+    a deterministic staging grid outside the floorplan.
+
+    With ``output_path`` set, the input ``pcb_path`` is left untouched and the
+    new content is written to ``output_path``. Without ``output_path`` the
+    write is in place. ``dry_run`` skips writes entirely.
+    """
+    pcb_path = Path(pcb_path)
+    schematic_netlist_path = Path(schematic_netlist_path)
+    project_dir = Path(project_dir) if project_dir is not None else pcb_path.parent
+
+    text = _read(pcb_path)
+    new_text, summary = _add_missing_footprints_in_memory(
+        text, pcb_path, schematic_netlist_path, project_dir
+    )
 
     diff = _diff(text, new_text, pcb_path)
 
@@ -1018,14 +1051,6 @@ def import_footprints(
             target.write_text(new_text, encoding="utf-8")
             wrote = True
 
-    # Parity check (post-import view): compare schematic refs vs. resulting
-    # footprint refs on the target board.
-    after_text = new_text
-    after_refs = _existing_refs(after_text)
-    parity_missing = sorted(set(sch_refs) - after_refs, key=_ref_sort_key)
-    parity_extra = sorted(after_refs - set(sch_refs), key=_ref_sort_key)
-    parity_clean = not parity_missing and not unresolved
-
     return {
         "action": "import_footprints",
         "changed": text != new_text,
@@ -1033,23 +1058,320 @@ def import_footprints(
         "target": str(target),
         "input_board": str(pcb_path),
         "diff": diff,
-        "details": {
-            "schematic_refs": len(sch_refs),
-            "existing_refs": len(existing),
-            "added": added,
-            "skipped_no_footprint": skipped_no_footprint,
-            "unresolved": unresolved,
-            "staging": {
-                "origin": [STAGING_ORIGIN_X, STAGING_ORIGIN_Y],
-                "pitch": STAGING_PITCH,
-                "cols": STAGING_COLS,
-            },
-            "parity": {
-                "clean": parity_clean,
-                "missing_on_board": parity_missing,
-                "extra_on_board": parity_extra,
-            },
-        },
+        "details": summary,
+    }
+
+
+# ---------------------------------------------------------------------------
+# sync_from_schematic
+# ---------------------------------------------------------------------------
+
+
+_PAD_HEAD_RE = _re.compile(r'^(\t\t)\(pad\s+"([^"]*)"', _re.MULTILINE)
+_PAD_NET_LINE_RE = _re.compile(
+    r'^(\t+)\(net\s+(?:\d+\s+)?"([^"]*)"\s*\)\s*\n', _re.MULTILINE
+)
+
+
+def _iter_pad_blocks_in_footprint(fp_block: str):
+    """Yield (open_idx, end_idx, pin_name, indent) for each ``(pad ...)``
+    subblock inside a footprint block. ``indent`` is the leading whitespace
+    (typically ``\\t\\t``) of the ``(pad`` line."""
+    for m in _PAD_HEAD_RE.finditer(fp_block):
+        indent = m.group(1)
+        pin = m.group(2)
+        open_idx = m.start() + len(indent)
+        end_idx = _find_block_end(fp_block, open_idx)
+        yield open_idx, end_idx, pin, indent
+
+
+def _pad_old_net(pad_text: str) -> str | None:
+    """Return the net name currently set on the pad, or None if absent."""
+    m = _PAD_NET_LINE_RE.search(pad_text)
+    return m.group(2) if m else None
+
+
+def _rewrite_pad_net(pad_text: str, indent: str, new_net: str) -> tuple[str, str | None, bool]:
+    """Rewrite or insert the ``(net "...")`` line of a pad.
+
+    ``indent`` is the indent of the ``(pad`` head; the inner net line uses
+    ``indent + '\\t'``. Returns (new_pad_text, old_net_or_None, inserted_bool).
+    """
+    inner_indent = indent + "\t"
+    new_line = f'{inner_indent}(net "{new_net}")\n'
+
+    m = _PAD_NET_LINE_RE.search(pad_text)
+    if m:
+        old = m.group(2)
+        if old == new_net:
+            return pad_text, old, False
+        new_text = pad_text[: m.start()] + new_line + pad_text[m.end():]
+        return new_text, old, False
+
+    # No (net ...) line — insert just before the (uuid ...) line.
+    uuid_pat = _re.compile(r'^(\t+)\(uuid\s+"[^"]+"\)\s*\n', _re.MULTILINE)
+    um = uuid_pat.search(pad_text)
+    if um:
+        new_text = pad_text[: um.start()] + new_line + pad_text[um.start():]
+        return new_text, None, True
+
+    # Fallback: insert before the closing ')' of the pad.
+    close = pad_text.rstrip()
+    if not close.endswith(")"):
+        return pad_text, None, False
+    close_idx = pad_text.rfind(")")
+    new_text = pad_text[:close_idx] + new_line + pad_text[close_idx:]
+    return new_text, None, True
+
+
+def _collect_pad_nets(text: str) -> set[str]:
+    """Return the set of net names referenced by any pad anywhere in ``text``."""
+    out: set[str] = set()
+    for open_idx, end_idx in _iter_top_blocks(text, "footprint"):
+        fp = text[open_idx:end_idx]
+        for p_open, p_end, _pin, _indent in _iter_pad_blocks_in_footprint(fp):
+            pad = fp[p_open:p_end]
+            n = _pad_old_net(pad)
+            if n is not None:
+                out.add(n)
+    return out
+
+
+_FP_HEAD_LIBID_RE = _re.compile(r'^\(footprint\s+"([^"]*)"((?:\s+[a-z_]+)?)')
+
+
+def _swap_footprint_libs_in_memory(
+    text: str,
+    components: dict[str, dict[str, Any]],
+    project_dir: Path,
+) -> tuple[str, dict[str, Any]]:
+    """Swap each on-board footprint's lib_id to match the schematic's
+    Footprint property when they differ. Preserves position (x/y/rotation),
+    board side (F.Cu/B.Cu), and uses deterministic UUIDs seeded from ref.
+    Pad nets are NOT preserved — the pad-net step that runs after this fixes
+    them. Locked footprints are refused.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import pcb_netlist  # noqa: WPS433
+
+    swapped: list[dict[str, Any]] = []
+    swap_skipped: list[dict[str, Any]] = []
+
+    # Iterate top-level footprint blocks. Because we mutate text length, we
+    # collect spans first, then rewrite right-to-left so earlier offsets stay
+    # valid.
+    spans = list(_iter_top_blocks(text, "footprint"))
+    new_text = text
+    for open_idx, end_idx in reversed(spans):
+        block = new_text[open_idx:end_idx]
+        m_ref = _re.search(r'\(property\s+"Reference"\s+"([^"]+)"', block)
+        if not m_ref:
+            continue
+        ref = m_ref.group(1)
+
+        comp = components.get(ref)
+        if comp is None:
+            # Footprint on board not in schematic — leave alone (parity check
+            # reports this elsewhere).
+            continue
+
+        m_head = _FP_HEAD_LIBID_RE.match(block)
+        if not m_head:
+            continue
+        cur_lib_id = m_head.group(1)
+
+        new_lib_id = comp.get("footprint", "") or ""
+        if not new_lib_id:
+            swap_skipped.append({"ref": ref, "reason": "no_schematic_footprint"})
+            continue
+        if new_lib_id == cur_lib_id:
+            continue
+
+        if _is_locked(block):
+            swap_skipped.append({
+                "ref": ref,
+                "reason": "locked",
+                "old_lib_id": cur_lib_id,
+                "new_lib_id": new_lib_id,
+            })
+            continue
+
+        mod_path = pcb_netlist.resolve_footprint_path(new_lib_id, project_dir)
+        if mod_path is None:
+            swap_skipped.append({
+                "ref": ref,
+                "reason": "unresolved",
+                "old_lib_id": cur_lib_id,
+                "new_lib_id": new_lib_id,
+            })
+            continue
+
+        cur_at = _block_at(block)
+        if cur_at is None:
+            swap_skipped.append({
+                "ref": ref,
+                "reason": "no_at",
+                "old_lib_id": cur_lib_id,
+                "new_lib_id": new_lib_id,
+            })
+            continue
+        old_x, old_y, old_rot = cur_at
+        cur_layer = _block_layer(block) or "F.Cu"
+
+        mod_text = mod_path.read_text(encoding="utf-8")
+        new_block = _build_footprint_block(
+            ref=ref,
+            value=comp.get("value", ""),
+            lib_id=new_lib_id,
+            mod_text=mod_text,
+            at_xy=(old_x, old_y),
+            rotation=old_rot,
+        )
+
+        if cur_layer == "B.Cu":
+            new_block = _flip_layer_strings_in_block(new_block)
+            new_block = _mirror_geometry_subforms(new_block)
+
+        # The existing block sits after a leading tab at open_idx-1; the new
+        # block from _reindent_footprint_block already starts with that tab.
+        # Splice over the leading tab as well so we don't double-indent.
+        splice_start = open_idx - 1 if open_idx > 0 and new_text[open_idx - 1] == "\t" else open_idx
+        new_text = new_text[:splice_start] + new_block + new_text[end_idx:]
+        swapped.append({
+            "ref": ref,
+            "old_lib_id": cur_lib_id,
+            "new_lib_id": new_lib_id,
+            "at": {"x": old_x, "y": old_y, "rotation": old_rot},
+            "side": cur_layer,
+        })
+
+    # Reverse swapped to maintain natural order (we built it right-to-left).
+    swapped.reverse()
+    swap_skipped.reverse()
+    return new_text, {"swapped": swapped, "swap_skipped": swap_skipped}
+
+
+def sync_from_schematic(
+    pcb_path: str | Path,
+    schematic_netlist_path: str | Path,
+    *,
+    project_dir: str | Path | None = None,
+    output_path: str | Path | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Add missing footprints AND update each pad's ``(net "...")`` to match
+    the schematic netlist. Idempotent.
+
+    Tracks/vias/zones are NOT touched. Footprints on the board that are not in
+    the schematic are reported via the parity summary as ``extra_on_board`` —
+    they are not removed.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import pcb_netlist  # noqa: WPS433
+
+    pcb_path = Path(pcb_path)
+    schematic_netlist_path = Path(schematic_netlist_path)
+    project_dir = Path(project_dir) if project_dir is not None else pcb_path.parent
+
+    text = _read(pcb_path)
+
+    # Step 1: add missing footprints in memory.
+    after_add_text, add_summary = _add_missing_footprints_in_memory(
+        text, pcb_path, schematic_netlist_path, project_dir
+    )
+
+    # Step 2: swap footprints whose schematic Footprint property changed.
+    components = pcb_netlist.parse_components(schematic_netlist_path)
+    after_swap_text, swap_summary = _swap_footprint_libs_in_memory(
+        after_add_text, components, project_dir
+    )
+
+    # Step 3: update pad net assignments based on schematic netlist.
+    membership = pcb_netlist.parse_net_membership(schematic_netlist_path)
+    pad_to_net: dict[tuple[str, str], str] = {}
+    for net_name, members in membership.items():
+        for ref, pin in members:
+            pad_to_net[(ref, pin)] = net_name
+
+    nets_before = _collect_pad_nets(after_swap_text)
+
+    pad_net_changes: list[dict[str, str]] = []
+    pad_net_added: list[dict[str, str]] = []
+
+    # Walk every footprint block, rebuild it with rewritten pad nets.
+    out_chunks: list[str] = []
+    cursor = 0
+    for open_idx, end_idx in _iter_top_blocks(after_swap_text, "footprint"):
+        fp_block = after_swap_text[open_idx:end_idx]
+        m_ref = _re.search(r'\(property\s+"Reference"\s+"([^"]+)"', fp_block)
+        if not m_ref:
+            continue
+        ref = m_ref.group(1)
+
+        # Rewrite each pad inside this footprint block.
+        new_fp_chunks: list[str] = []
+        fp_cursor = 0
+        for p_open, p_end, pin, indent in _iter_pad_blocks_in_footprint(fp_block):
+            new_fp_chunks.append(fp_block[fp_cursor:p_open])
+            pad_text = fp_block[p_open:p_end]
+
+            target_net = pad_to_net.get((ref, pin))
+            if target_net is None:
+                # Pad not in netlist (NC) — leave alone.
+                new_fp_chunks.append(pad_text)
+            else:
+                new_pad, old_net, inserted = _rewrite_pad_net(pad_text, indent, target_net)
+                if inserted:
+                    pad_net_added.append({"ref": ref, "pad": pin, "net": target_net})
+                elif old_net is not None and old_net != target_net:
+                    pad_net_changes.append({
+                        "ref": ref, "pad": pin, "old": old_net, "new": target_net,
+                    })
+                new_fp_chunks.append(new_pad)
+            fp_cursor = p_end
+        new_fp_chunks.append(fp_block[fp_cursor:])
+        new_fp_block = "".join(new_fp_chunks)
+
+        out_chunks.append(after_swap_text[cursor:open_idx])
+        out_chunks.append(new_fp_block)
+        cursor = end_idx
+    out_chunks.append(after_swap_text[cursor:])
+    new_text = "".join(out_chunks)
+
+    nets_after = _collect_pad_nets(new_text)
+    orphaned_nets = sorted(nets_before - nets_after)
+
+    diff = _diff(text, new_text, pcb_path)
+
+    target = Path(output_path) if output_path is not None else pcb_path
+    changed = text != new_text
+    wrote = False
+    if not dry_run:
+        in_place = output_path is None or _same_file(target, pcb_path)
+        if in_place:
+            if changed:
+                pcb_path.write_text(new_text, encoding="utf-8")
+                wrote = True
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(new_text, encoding="utf-8")
+            wrote = True
+
+    details = dict(add_summary)
+    details["swapped"] = swap_summary["swapped"]
+    details["swap_skipped"] = swap_summary["swap_skipped"]
+    details["pad_net_changes"] = pad_net_changes
+    details["pad_net_added"] = pad_net_added
+    details["orphaned_nets"] = orphaned_nets
+
+    return {
+        "action": "sync_from_schematic",
+        "changed": changed,
+        "wrote": wrote,
+        "target": str(target),
+        "input_board": str(pcb_path),
+        "diff": diff,
+        "details": details,
     }
 
 
@@ -1115,4 +1437,5 @@ __all__ = [
     "move_footprint_layer",
     "delete_footprint",
     "import_footprints",
+    "sync_from_schematic",
 ]

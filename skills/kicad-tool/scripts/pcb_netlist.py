@@ -1,4 +1,4 @@
-"""Netlist + fp-lib-table helpers used by ``pcb import-footprints`` /
+"""Netlist + fp-lib-table helpers used by ``pcb sync`` /
 ``pcb validate``.
 
 Reuses the small S-expression parser style already in ``sch_netlist.py``, but
