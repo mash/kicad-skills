@@ -17,7 +17,14 @@ kicad-tool <domain> <command> ...
 
 `KICAD_CLI` overrides the executable. Default: `/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli`.
 
-Install once from the plugin repo root: `pip install .` (or `pip install -e .` for editable). This declares the kiutils fork dep and exposes the `kicad-tool` console script.
+### Install
+
+Pulls the **`kiutils` fork** (`https://github.com/mash/kiutils`, pinned in `pyproject.toml`; upstream lacks API used here). Never `pip install kiutils` — that grabs upstream and breaks the tool.
+
+- Full repo cloned: `pip install .` from repo root (`-e` for skill dev).
+- Only `skills/kicad-tool/` copied: `pip install "git+https://github.com/mash/kicad-skills"`.
+
+Verify: `kicad-tool --help`.
 
 ## Argument conventions
 
