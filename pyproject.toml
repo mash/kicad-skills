@@ -12,8 +12,18 @@ dependencies = [
   "kiutils @ git+https://github.com/mash/kiutils.git@77994e0e65c3d97e3f11910fe3d05d1fc3b06fc7",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=8", "coverage[toml]>=7"]
+
 [project.scripts]
 kicad-tool = "kicad_tool:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.coverage.run]
+branch = true
 
 [tool.setuptools]
 py-modules = [

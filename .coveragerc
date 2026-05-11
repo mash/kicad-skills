@@ -1,0 +1,9 @@
+[run]
+source = skills/kicad-tool/scripts
+branch = true
+parallel = true
+
+[paths]
+source =
+    skills/kicad-tool/scripts
+    */skills/kicad-tool/scripts

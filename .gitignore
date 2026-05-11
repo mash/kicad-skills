@@ -6,3 +6,7 @@ tmp/
 build/
 dist/
 docs/
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
