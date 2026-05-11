@@ -16,12 +16,15 @@ Functions correspond 1:1 to the unified subcommand layout in
     sch query lib-symbol --lib-id LIB_ID    -> query_lib_symbol
     sch query list <element>                -> query_list
 
-Net-membership resolution requires a netlist file (``netlist_path``); the
-parser here is a small stand-in until ``sch_netlist.py`` is available.
+Net-membership resolution uses ``sch_netlist.parse_netlist`` against a
+generated netlist; ``netlist_path`` may be supplied explicitly, or resolved
+automatically from a sibling ``.kicad_pro`` plus mtime-aware cache.
 """
 from __future__ import annotations
 
-import re
+import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Iterable
@@ -31,6 +34,8 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from kiutils.schematic import Schematic
+
+import sch_netlist
 
 from kicad_sch_bbox_collisions import (
     SymbolBox,
@@ -230,6 +235,7 @@ def query_pin(
     sch: Schematic | str | Path,
     ref_pin: str,
     netlist_path: str | Path | None = None,
+    auto_netlist: bool = True,
 ) -> dict[str, Any]:
     s = _as_schematic(sch)
     ref, pin_id = _split_ref_pin(ref_pin)
@@ -253,76 +259,161 @@ def query_pin(
         "length": pin["length"],
         "net": None,
     }
-    if netlist_path is not None:
-        net = _net_of_pin_from_netlist(netlist_path, ref, pin_id)
-        result["net"] = net
+    resolved = _resolve_netlist_path(sch, netlist_path, auto=auto_netlist)
+    if resolved is not None:
+        result["net"] = _net_of_pin_from_netlist(resolved, ref, pin_id)
     return result
 
 
 # ---------------------------------------------------------------------------
-# Netlist parsing (minimal stand-in for sch_netlist.py)
+# Netlist resolution (auto-generation + mtime cache)
 # ---------------------------------------------------------------------------
 
 
-_NET_BLOCK_RE = re.compile(
-    r"\(net\s+\(code\s+\"?([^\")]+)\"?\)\s*\(name\s+\"([^\"]*)\"\)(.*?)\)\s*(?=\(net|\)\s*\)\s*$|\(net|\Z)",
-    re.DOTALL,
-)
-_NODE_RE = re.compile(
-    r"\(node\s+\(ref\s+\"([^\"]+)\"\)\s+\(pin\s+\"([^\"]+)\"\)(?:\s+\(pinfunction\s+\"([^\"]*)\"\))?(?:\s+\(pintype\s+\"([^\"]*)\"\))?",
-)
+CACHE_DIR_NAME = ".kicad-tool-cache"
 
 
-def _parse_netlist(path: str | Path) -> list[dict[str, Any]]:
-    """TODO: replace with sch_netlist.py once that module exists."""
-    text = Path(path).read_text()
-    nets: list[dict[str, Any]] = []
-    # More robust: walk net blocks one by one.
-    i = 0
-    while True:
-        idx = text.find("(net ", i)
-        if idx < 0:
+def _read_top_sheet_from_pro(pro_path: Path) -> Path | None:
+    try:
+        data = json.loads(pro_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    sheets = (
+        data.get("schematic", {}).get("top_level_sheets")
+        if isinstance(data, dict)
+        else None
+    )
+    if not sheets:
+        return None
+    first = sheets[0]
+    filename = first.get("filename") if isinstance(first, dict) else None
+    if not filename:
+        return None
+    return (pro_path.parent / filename).resolve()
+
+
+def _find_top_sheet(sheet_path: Path) -> Path | None:
+    """Locate the project's top schematic sheet for ``sheet_path``.
+
+    Strategy: look for a ``.kicad_pro`` in the same directory, then in parent
+    directories (up to 4 levels). Read ``schematic.top_level_sheets[0].filename``
+    if present; otherwise fall back to ``<projectname>.kicad_sch`` next to the
+    pro file.
+    """
+    sheet_path = Path(sheet_path).resolve()
+    base = sheet_path.parent
+    for _ in range(5):
+        pros = sorted(base.glob("*.kicad_pro"))
+        if pros:
+            pro = pros[0]
+            top = _read_top_sheet_from_pro(pro)
+            if top is not None and top.exists():
+                return top
+            fallback = pro.with_suffix(".kicad_sch")
+            if fallback.exists():
+                return fallback.resolve()
+            return None
+        if base.parent == base:
             break
-        # find matching close paren
-        depth = 0
-        j = idx
-        while j < len(text):
-            c = text[j]
-            if c == "(":
-                depth += 1
-            elif c == ")":
-                depth -= 1
-                if depth == 0:
-                    j += 1
-                    break
-            j += 1
-        block = text[idx:j]
-        i = j
-        m_code = re.search(r"\(code\s+\"?([^\")\s]+)\"?\)", block)
-        m_name = re.search(r"\(name\s+\"([^\"]*)\"\)", block)
-        if not m_name:
-            continue
-        nodes: list[dict[str, Any]] = []
-        for nm in _NODE_RE.finditer(block):
-            nodes.append({
-                "ref": nm.group(1),
-                "pin": nm.group(2),
-                "pin_function": nm.group(3),
-                "pin_type": nm.group(4),
-            })
-        nets.append({
-            "code": m_code.group(1) if m_code else None,
-            "name": m_name.group(1),
-            "nodes": nodes,
-        })
-    return nets
+        base = base.parent
+    return None
+
+
+def _cache_path_for(top_sheet: Path) -> Path:
+    return top_sheet.parent / CACHE_DIR_NAME / (top_sheet.stem + ".net")
+
+
+def _max_sch_mtime(top_sheet: Path) -> float:
+    project_dir = top_sheet.parent
+    latest = 0.0
+    try:
+        for p in project_dir.rglob("*.kicad_sch"):
+            try:
+                m = p.stat().st_mtime
+            except OSError:
+                continue
+            if m > latest:
+                latest = m
+    except OSError:
+        pass
+    return latest
+
+
+def _kicad_cli() -> str:
+    return os.environ.get(
+        "KICAD_CLI", "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli"
+    )
+
+
+def _generate_netlist(top_sheet: Path, out: Path) -> bool:
+    out.parent.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.run(
+        [
+            _kicad_cli(),
+            "sch",
+            "export",
+            "netlist",
+            "--output",
+            str(out),
+            str(top_sheet),
+        ],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return proc.returncode == 0 and out.exists()
+
+
+def _resolve_netlist_path(
+    sch: Schematic | str | Path,
+    netlist_path: str | Path | None,
+    auto: bool = True,
+) -> Path | None:
+    """Return a usable netlist path.
+
+    - If ``netlist_path`` is provided, use it as-is.
+    - Otherwise, when ``auto`` is True, find the project's top sheet and
+      return a cached netlist under ``<project>/.kicad-tool-cache/<name>.net``;
+      regenerate it via ``kicad-cli`` when stale or missing.
+    - Returns ``None`` when ``auto`` is False or auto-generation cannot
+      succeed (no project file, kicad-cli failure, etc.).
+    """
+    if netlist_path is not None:
+        return Path(netlist_path)
+    if not auto:
+        return None
+    sheet_path = _schematic_path(sch)
+    if sheet_path is None:
+        return None
+    top = _find_top_sheet(sheet_path)
+    if top is None:
+        return None
+    cache = _cache_path_for(top)
+    try:
+        cache_mtime = cache.stat().st_mtime if cache.exists() else 0.0
+    except OSError:
+        cache_mtime = 0.0
+    if cache_mtime <= _max_sch_mtime(top):
+        if not _generate_netlist(top, cache):
+            return None
+    return cache
+
+
+def _schematic_path(sch: Schematic | str | Path) -> Path | None:
+    if isinstance(sch, (str, Path)):
+        return Path(sch)
+    fp = getattr(sch, "filePath", None) or getattr(sch, "file_path", None)
+    if fp:
+        return Path(fp)
+    return None
 
 
 def _net_of_pin_from_netlist(path: str | Path, ref: str, pin: str) -> dict[str, Any] | None:
-    for net in _parse_netlist(path):
-        for node in net["nodes"]:
+    nets = sch_netlist.parse_netlist(str(path))
+    for name, nodes in nets.items():
+        for node in nodes:
             if node["ref"] == ref and node["pin"] == pin:
-                return {"name": net["name"], "code": net["code"], "nodes": net["nodes"]}
+                return {"name": name, "nodes": nodes}
     return None
 
 
@@ -332,24 +423,26 @@ def _net_of_pin_from_netlist(path: str | Path, ref: str, pin: str) -> dict[str, 
 
 
 def query_net(
-    sch: Schematic | str | Path,  # unused; kept for symmetry
-    netlist_path: str | Path,
+    sch: Schematic | str | Path,
+    netlist_path: str | Path | None = None,
     name: str | None = None,
     pin: str | None = None,
 ) -> dict[str, Any]:
     if name is None and pin is None:
         return {"found": False, "reason": "either name or pin required"}
-    nets = _parse_netlist(netlist_path)
+    resolved = _resolve_netlist_path(sch, netlist_path)
+    if resolved is None:
+        return {"found": False, "reason": "netlist unavailable"}
+    nets = sch_netlist.parse_netlist(str(resolved))
     if name is not None:
-        match = next((n for n in nets if n["name"] == name), None)
-        if match is None:
+        if name not in nets:
             return {"found": False, "name": name}
-        return {"found": True, **match}
+        return {"found": True, "name": name, "nodes": nets[name]}
     ref, pin_id = _split_ref_pin(pin)  # type: ignore[arg-type]
-    for net in nets:
-        for node in net["nodes"]:
+    for net_name, nodes in nets.items():
+        for node in nodes:
             if node["ref"] == ref and node["pin"] == pin_id:
-                return {"found": True, **net}
+                return {"found": True, "name": net_name, "nodes": nodes}
     return {"found": False, "ref": ref, "pin": pin_id}
 
 
@@ -481,6 +574,7 @@ def query_list(
     sch: Schematic | str | Path,
     element: str,
     netlist_path: str | Path | None = None,
+    auto_netlist: bool = True,
 ) -> dict[str, Any]:
     s = _as_schematic(sch)
     element = element.lower()
@@ -521,8 +615,10 @@ def query_list(
         ]
         return {"element": "junctions", "items": items}
     if element in ("net", "nets"):
-        if netlist_path is None:
-            return {"element": "nets", "items": [], "reason": "netlist_path required"}
-        nets = _parse_netlist(netlist_path)
-        return {"element": "nets", "items": nets}
+        resolved = _resolve_netlist_path(sch, netlist_path, auto=auto_netlist)
+        if resolved is None:
+            return {"element": "nets", "items": [], "reason": "netlist unavailable"}
+        nets = sch_netlist.parse_netlist(str(resolved))
+        items = [{"name": name, "nodes": nodes} for name, nodes in nets.items()]
+        return {"element": "nets", "items": items}
     return {"element": element, "items": [], "reason": "unknown element"}

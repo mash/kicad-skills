@@ -1118,7 +1118,12 @@ def cmd_sch_query_symbol(args: argparse.Namespace) -> int:
 def cmd_sch_query_pin(args: argparse.Namespace) -> int:
     return _emit_query(
         args,
-        sch_query.query_pin(args.schematic, args.ref_pin, netlist_path=args.netlist),
+        sch_query.query_pin(
+            args.schematic,
+            args.ref_pin,
+            netlist_path=args.netlist,
+            auto_netlist=not getattr(args, "no_netlist", False),
+        ),
     )
 
 
@@ -1158,7 +1163,12 @@ def cmd_sch_query_lib_symbol(args: argparse.Namespace) -> int:
 def cmd_sch_query_list(args: argparse.Namespace) -> int:
     return _emit_query(
         args,
-        sch_query.query_list(args.schematic, args.element, netlist_path=args.netlist),
+        sch_query.query_list(
+            args.schematic,
+            args.element,
+            netlist_path=args.netlist,
+            auto_netlist=not getattr(args, "no_netlist", False),
+        ),
     )
 
 
@@ -1343,14 +1353,18 @@ def _add_query_subparsers(sch_commands) -> None:
     p = qsub.add_parser("pin", help="query a pin (REF.PIN)")
     p.add_argument("schematic", type=Path)
     p.add_argument("ref_pin", help="REF.PIN, e.g. U1.F3")
-    p.add_argument("--netlist", type=Path, default=None)
+    p.add_argument("--netlist", type=Path, default=None,
+                   help="explicit netlist; auto-generated from .kicad_pro if omitted")
+    p.add_argument("--no-netlist", action="store_true",
+                   help="skip netlist lookup (no auto-generation)")
     p.add_argument("--format", choices=["json", "text"], default="text")
     p.set_defaults(func=cmd_sch_query_pin)
 
     p = qsub.add_parser("net", help="query a net by name or REF.PIN")
     p.add_argument("schematic", type=Path)
     p.add_argument("target", help="net name or REF.PIN (dispatched by '.')")
-    p.add_argument("--netlist", type=Path, required=True)
+    p.add_argument("--netlist", type=Path, default=None,
+                   help="explicit netlist; auto-generated from .kicad_pro if omitted")
     p.add_argument("--format", choices=["json", "text"], default="text")
     p.set_defaults(func=cmd_sch_query_net)
 
@@ -1384,7 +1398,10 @@ def _add_query_subparsers(sch_commands) -> None:
     p = qsub.add_parser("list", help="list elements")
     p.add_argument("schematic", type=Path)
     p.add_argument("element", choices=["symbols", "labels", "wires", "junctions", "nets"])
-    p.add_argument("--netlist", type=Path, default=None)
+    p.add_argument("--netlist", type=Path, default=None,
+                   help="explicit netlist (for 'nets'); auto-generated if omitted")
+    p.add_argument("--no-netlist", action="store_true",
+                   help="skip netlist lookup (no auto-generation)")
     p.add_argument("--format", choices=["json", "text"], default="text")
     p.set_defaults(func=cmd_sch_query_list)
 
