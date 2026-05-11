@@ -702,7 +702,9 @@ def cmd_pcb_sync(args: argparse.Namespace) -> int:
         )
         print(
             f"swapped={len(d.get('swapped', []))} "
-            f"swap_skipped={len(d.get('swap_skipped', []))}"
+            f"swap_skipped={len(d.get('swap_skipped', []))} "
+            f"refreshed={len(d.get('refreshed', []))} "
+            f"refresh_skipped={len(d.get('refresh_skipped', []))}"
         )
         if d.get("swapped"):
             for s in d["swapped"]:
@@ -710,6 +712,14 @@ def cmd_pcb_sync(args: argparse.Namespace) -> int:
         if d.get("swap_skipped"):
             for s in d["swap_skipped"]:
                 print(f"  swap-skip {s['ref']} ({s['reason']})")
+        if d.get("refreshed"):
+            for r in d["refreshed"]:
+                preserved = r.get("preserved_user_properties") or []
+                tail = f" preserved={preserved}" if preserved else ""
+                print(f"  refresh {r['ref']}: {r['lib_id']}{tail}")
+        if d.get("refresh_skipped"):
+            for r in d["refresh_skipped"]:
+                print(f"  refresh-skip {r['ref']} ({r['reason']})")
         if d["unresolved"]:
             print(f"unresolved: {d['unresolved']}")
         if d["skipped_no_footprint"]:

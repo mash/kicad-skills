@@ -911,6 +911,46 @@ def _build_footprint_block(
 
     text = _re.sub(r'\(uuid\s+"[^"]+"\)', _sub_uuid_skipfirst, text)
 
+    # 7b. Bake the footprint rotation into each pad's (at X Y R). KiCad
+    #     serializes pad rotation in the .kicad_pcb as absolute
+    #     (footprint_rotation + template_pad_rotation); template files only
+    #     carry the latter, so without this step a footprint rebuilt from
+    #     .kicad_mod onto a non-zero footprint rotation would render with
+    #     incorrect pad orientation (rectangular SMD pads pointing along the
+    #     wrong axis).
+    if rotation:
+        # _iter_pad_blocks_in_footprint expects 2-tab indented pads; the
+        # un-reindented kicad_mod text has them at 1-tab indent. Match that.
+        pad_head_pat = _re.compile(r'^(\t)\(pad\s+"([^"]*)"', _re.MULTILINE)
+        out_chunks: list[str] = []
+        cursor = 0
+        for m in pad_head_pat.finditer(text):
+            indent = m.group(1)
+            p_open = m.start() + len(indent)
+            p_end = _find_block_end(text, p_open)
+            pad = text[p_open:p_end]
+            at_m = _re.search(
+                r'\(at\s+(-?[\d.]+)\s+(-?[\d.]+)((?:\s+-?[\d.]+)?)\s*\)',
+                pad,
+            )
+            if at_m:
+                x = float(at_m.group(1))
+                y = float(at_m.group(2))
+                rest = at_m.group(3).strip()
+                existing_rot = float(rest) if rest else 0.0
+                new_rot = (existing_rot + float(rotation)) % 360
+                if new_rot >= 180:
+                    new_rot -= 360
+                new_at = (
+                    f"(at {_fmt_coord(x)} {_fmt_coord(y)} {_fmt_coord(new_rot)})"
+                )
+                pad = pad[: at_m.start()] + new_at + pad[at_m.end() :]
+            out_chunks.append(text[cursor:p_open])
+            out_chunks.append(pad)
+            cursor = p_end
+        out_chunks.append(text[cursor:])
+        text = "".join(out_chunks)
+
     # 8. Re-indent.
     text = _reindent_footprint_block(text)
 
@@ -1118,12 +1158,17 @@ def _rewrite_pad_net(pad_text: str, indent: str, new_net: str) -> tuple[str, str
         new_text = pad_text[: um.start()] + new_line + pad_text[um.start():]
         return new_text, None, True
 
-    # Fallback: insert before the closing ')' of the pad.
+    # Fallback: pad has neither (uuid ...) nor an existing (net ...) line.
+    # Reformat the closing region to multi-line layout — body, then the
+    # injected net on its own line, then the closing paren on its own line —
+    # so subsequent syncs can find/update the net via _PAD_NET_LINE_RE
+    # instead of inserting a duplicate.
     close = pad_text.rstrip()
     if not close.endswith(")"):
         return pad_text, None, False
     close_idx = pad_text.rfind(")")
-    new_text = pad_text[:close_idx] + new_line + pad_text[close_idx:]
+    body = pad_text[:close_idx].rstrip()
+    new_text = body + "\n" + new_line + indent + ")"
     return new_text, None, True
 
 
@@ -1247,6 +1292,192 @@ def _remove_link_subforms(block: str) -> str:
     return "".join(out)
 
 
+def _property_keys_in_block(block: str) -> list[str]:
+    """List of (property "<key>" ...) keys found at the top level of a
+    footprint block, in order."""
+    work = block.lstrip("\t")
+    body_start = _footprint_head_end(work)
+    keys: list[str] = []
+    for head, oi, ei in _iter_subforms(work, body_start):
+        if head == "property":
+            m = _re.match(r'\(property\s+"([^"]+)"', work[oi:ei])
+            if m:
+                keys.append(m.group(1))
+    return keys
+
+
+def _extract_property_map(block: str) -> dict[str, str]:
+    """Map property key -> full ``(property "K" "V" ...)`` subform text from
+    a footprint block. Used to carry per-property placement / effects / layer
+    / hide flags across a footprint rebuild."""
+    work = block.lstrip("\t")
+    body_start = _footprint_head_end(work)
+    out: dict[str, str] = {}
+    for head, oi, ei in _iter_subforms(work, body_start):
+        if head != "property":
+            continue
+        m = _re.match(r'\(property\s+"([^"]+)"', work[oi:ei])
+        if m:
+            out[m.group(1)] = work[oi:ei]
+    return out
+
+
+def _preserve_template_property_placements(
+    fresh_block: str, old_block: str, template_keys: set[str]
+) -> str:
+    """For each template-key property present in both blocks, replace the
+    subform in ``fresh_block`` with the one from ``old_block`` (patched so its
+    value string matches what fresh has). Carries over user-tweaked
+    ``(at ...)`` / ``(layer ...)`` / ``(effects ...)`` / ``(hide ...)`` for
+    Reference, Value, Datasheet, etc. — KiCad GUI's
+    "Update Footprints from Library" preserves these by default and we should
+    too."""
+    old_props = _extract_property_map(old_block)
+    if not old_props:
+        return fresh_block
+    had_tab = fresh_block.startswith("\t")
+    work = fresh_block[1:] if had_tab else fresh_block
+    body_start = _footprint_head_end(work)
+    out_parts: list[str] = [work[:body_start]]
+    cursor = body_start
+    for head, oi, ei in _iter_subforms(work, body_start):
+        if head != "property":
+            continue
+        m = _re.match(r'\(property\s+"([^"]+)"\s+"([^"]*)"', work[oi:ei])
+        if not m:
+            continue
+        key = m.group(1)
+        if key not in template_keys or key not in old_props:
+            continue
+        new_value = m.group(2)
+        patched = _re.sub(
+            r'(\(property\s+"' + _re.escape(key) + r'"\s+)"[^"]*"',
+            lambda mm: mm.group(1) + '"' + new_value.replace('"', '\\"') + '"',
+            old_props[key],
+            count=1,
+        )
+        out_parts.append(work[cursor:oi])
+        out_parts.append(patched)
+        cursor = ei
+    out_parts.append(work[cursor:])
+    s = "".join(out_parts)
+    return ("\t" + s) if had_tab else s
+
+
+def _extract_user_property_subforms(block: str, template_keys: set[str]) -> str:
+    """Concatenated text of (property "<key>" ...) subforms whose key is NOT
+    in ``template_keys`` (i.e. user-added properties that the .kicad_mod
+    template does not provide). Each chunk includes its leading line indent
+    and a trailing newline so it splices cleanly."""
+    work = block.lstrip("\t")
+    body_start = _footprint_head_end(work)
+    chunks: list[str] = []
+    for head, oi, ei in _iter_subforms(work, body_start):
+        if head != "property":
+            continue
+        m = _re.match(r'\(property\s+"([^"]+)"', work[oi:ei])
+        if not m or m.group(1) in template_keys:
+            continue
+        line_start = work.rfind("\n", 0, oi) + 1
+        chunks.append(work[line_start:ei] + "\n")
+    return "".join(chunks)
+
+
+def _inject_user_properties(new_block: str, props_text: str) -> str:
+    """Insert ``props_text`` after the last (property ...) form in
+    ``new_block``. If new_block already contains any (path/sheetname/sheetfile)
+    link form, props are still inserted before it (after the last property
+    that precedes the link). No-op when ``props_text`` is empty."""
+    if not props_text:
+        return new_block
+    fp_off = new_block.find("(footprint")
+    if fp_off < 0:
+        return new_block
+    inner = new_block[fp_off:]
+    body_start_inner = _footprint_head_end(inner)
+    body_start = fp_off + body_start_inner
+    last_prop_end = -1
+    for head, oi, ei in _iter_subforms(new_block, body_start):
+        if head == "property":
+            last_prop_end = ei
+        elif head in _LINK_HEADS:
+            break
+    if last_prop_end < 0:
+        return new_block
+    insert_at = last_prop_end
+    if insert_at < len(new_block) and new_block[insert_at] == "\n":
+        insert_at += 1
+    return new_block[:insert_at] + props_text + new_block[insert_at:]
+
+
+def _extract_pad_net_map(fp_block: str) -> dict[str, str]:
+    """Return ``pin_name -> net_name`` for pads that currently have a
+    (net ...) line. Pads without a net (NC) are omitted."""
+    out: dict[str, str] = {}
+    for p_open, p_end, pin, _indent in _iter_pad_blocks_in_footprint(fp_block):
+        n = _pad_old_net(fp_block[p_open:p_end])
+        if n is not None:
+            out[pin] = n
+    return out
+
+
+def _apply_pad_net_map(fp_block: str, pin_to_net: dict[str, str]) -> str:
+    """For each pad in ``fp_block``, set its (net ...) to ``pin_to_net[pin]``
+    when present. Pads not in the map are left as-is."""
+    out_chunks: list[str] = []
+    cursor = 0
+    for p_open, p_end, pin, indent in _iter_pad_blocks_in_footprint(fp_block):
+        out_chunks.append(fp_block[cursor:p_open])
+        pad_text = fp_block[p_open:p_end]
+        net = pin_to_net.get(pin)
+        if net:
+            new_pad, _, _ = _rewrite_pad_net(pad_text, indent, net)
+            out_chunks.append(new_pad)
+        else:
+            out_chunks.append(pad_text)
+        cursor = p_end
+    out_chunks.append(fp_block[cursor:])
+    return "".join(out_chunks)
+
+
+_UUID_LINE_RE = _re.compile(r'\(uuid\s+"[^"]*"\)')
+
+
+def _normalize_for_refresh_compare(block: str, template_keys: set[str]) -> str:
+    """Strip instance-specific content from a footprint block so two blocks
+    can be compared structurally. Removes uuids, pad (net ...) lines, link
+    subforms, and user-added properties; collapses whitespace runs."""
+    s = block.lstrip("\t")
+    s = _UUID_LINE_RE.sub('(uuid "")', s)
+    s = _PAD_NET_LINE_RE.sub('', s)
+    s = _remove_link_subforms(s)
+    body_start = _footprint_head_end(s)
+    out_parts: list[str] = [s[:body_start]]
+    cursor = body_start
+    for head, oi, ei in _iter_subforms(s, body_start):
+        if head != "property":
+            continue
+        # Drop ALL property subforms from the comparison: placement / effects
+        # / layer / hide are preserved across rebuild via
+        # _preserve_template_property_placements (template keys) and
+        # _inject_user_properties (user keys), so a property-only divergence
+        # would not change the rebuilt block and should not trigger refresh.
+        # ``template_keys`` is unused here but kept in the signature for
+        # callers passing it through.
+        line_start = s.rfind("\n", 0, oi) + 1
+        line_end = ei
+        if line_end < len(s) and s[line_end] == "\n":
+            line_end += 1
+        out_parts.append(s[cursor:line_start])
+        cursor = line_end
+    out_parts.append(s[cursor:])
+    s = "".join(out_parts)
+    # Collapse all whitespace runs to nothing — refreshed/inserted blocks may
+    # carry quirky indentation (e.g. legacy pad-net inserts) that we don't
+    # want to flag as a body-divergence.
+    return _re.sub(r'\s+', '', s)
+
+
 def _swap_footprint_libs_in_memory(
     text: str,
     components: dict[str, dict[str, Any]],
@@ -1339,6 +1570,16 @@ def _swap_footprint_libs_in_memory(
             new_block = _flip_layer_strings_in_block(new_block)
             new_block = _mirror_geometry_subforms(new_block)
 
+        # Carry over template-property placements (Reference / Value /
+        # Datasheet / Description / Footprint) from the existing footprint:
+        # at / layer / effects / hide. KiCad GUI's "Update Footprints from
+        # Library" preserves these by default, and resetting them to the
+        # .kicad_mod default would lose user-positioned ref text.
+        template_keys = set(_property_keys_in_block(new_block))
+        new_block = _preserve_template_property_placements(
+            new_block, block, template_keys
+        )
+
         # Carry over the schematic-link subforms (path / sheetname / sheetfile)
         # from the existing footprint. _build_footprint_block synthesises a
         # fresh block from the .kicad_mod template, which has none of these.
@@ -1365,6 +1606,131 @@ def _swap_footprint_libs_in_memory(
     swapped.reverse()
     swap_skipped.reverse()
     return new_text, {"swapped": swapped, "swap_skipped": swap_skipped}
+
+
+def _refresh_footprints_in_memory(
+    text: str,
+    components: dict[str, dict[str, Any]],
+    project_dir: Path,
+    exclude_refs: set[str],
+) -> tuple[str, dict[str, Any]]:
+    """Rebuild on-board footprints from their .kicad_mod template when their
+    body diverges from the library (KiCad GUI's "Update Footprints from
+    Library"). Skips refs in ``exclude_refs`` (typically just-added /
+    just-swapped) and footprints whose lib_id does not match the schematic.
+
+    Preserved per refresh: position/rotation/layer, schematic-link subforms
+    (path/sheetname/sheetfile), pad nets (by pin name), and any property whose
+    key is not present in the template (e.g. Manufacturer / LCSC / MPN).
+    Locked footprints are skipped.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import pcb_netlist  # noqa: WPS433
+
+    refreshed: list[dict[str, Any]] = []
+    refresh_skipped: list[dict[str, Any]] = []
+
+    spans = list(_iter_top_blocks(text, "footprint"))
+    new_text = text
+    for open_idx, end_idx in reversed(spans):
+        block = new_text[open_idx:end_idx]
+        m_ref = _re.search(r'\(property\s+"Reference"\s+"([^"]+)"', block)
+        if not m_ref:
+            continue
+        ref = m_ref.group(1)
+        if ref in exclude_refs:
+            continue
+
+        comp = components.get(ref)
+        if comp is None:
+            continue
+        lib_id = comp.get("footprint", "") or ""
+        if not lib_id:
+            continue
+
+        m_head = _FP_HEAD_LIBID_RE.match(block)
+        if not m_head:
+            continue
+        cur_lib_id = m_head.group(1)
+        if cur_lib_id != lib_id:
+            # Lib_id divergence is the swap step's responsibility; if we get
+            # here that step skipped the swap, so don't refresh either.
+            continue
+
+        if _is_locked(block):
+            refresh_skipped.append({"ref": ref, "reason": "locked"})
+            continue
+
+        mod_path = pcb_netlist.resolve_footprint_path(lib_id, project_dir)
+        if mod_path is None:
+            refresh_skipped.append({"ref": ref, "reason": "unresolved", "lib_id": lib_id})
+            continue
+
+        cur_at = _block_at(block)
+        if cur_at is None:
+            refresh_skipped.append({"ref": ref, "reason": "no_at"})
+            continue
+        old_x, old_y, old_rot = cur_at
+        cur_layer = _block_layer(block) or "F.Cu"
+
+        mod_text = mod_path.read_text(encoding="utf-8")
+        fresh_block = _build_footprint_block(
+            ref=ref,
+            value=comp.get("value", ""),
+            lib_id=lib_id,
+            mod_text=mod_text,
+            at_xy=(old_x, old_y),
+            rotation=old_rot,
+        )
+        if cur_layer == "B.Cu":
+            fresh_block = _flip_layer_strings_in_block(fresh_block)
+            fresh_block = _mirror_geometry_subforms(fresh_block)
+
+        template_keys = set(_property_keys_in_block(fresh_block))
+
+        # No semantic difference → skip refresh.
+        if (
+            _normalize_for_refresh_compare(block, template_keys)
+            == _normalize_for_refresh_compare(fresh_block, template_keys)
+        ):
+            continue
+
+        link_text = _extract_link_subforms(block) or _link_subforms_from_comp(comp)
+        user_props = _extract_user_property_subforms(block, template_keys)
+        pin_to_net = _extract_pad_net_map(block)
+
+        # Carry over template-property placements first so the property
+        # bodies match the user's positioning before user-property and link
+        # injection (which insert subforms relative to the property block).
+        refreshed_block = _preserve_template_property_placements(
+            fresh_block, block, template_keys
+        )
+        refreshed_block = _inject_user_properties(refreshed_block, user_props)
+        refreshed_block = _inject_link_subforms(refreshed_block, link_text)
+        refreshed_block = _apply_pad_net_map(refreshed_block, pin_to_net)
+
+        splice_start = (
+            open_idx - 1
+            if open_idx > 0 and new_text[open_idx - 1] == "\t"
+            else open_idx
+        )
+        new_text = new_text[:splice_start] + refreshed_block + new_text[end_idx:]
+
+        preserved_keys = [
+            k for k in _property_keys_in_block(block) if k not in template_keys
+        ]
+        refreshed.append({
+            "ref": ref,
+            "lib_id": lib_id,
+            "at": {"x": old_x, "y": old_y, "rotation": old_rot},
+            "side": cur_layer,
+            "preserved_user_properties": preserved_keys,
+            "preserved_pad_nets": len(pin_to_net),
+        })
+
+    refreshed.reverse()
+    refresh_skipped.reverse()
+    return new_text, {"refreshed": refreshed, "refresh_skipped": refresh_skipped}
 
 
 def sync_from_schematic(
@@ -1402,14 +1768,24 @@ def sync_from_schematic(
         after_add_text, components, project_dir
     )
 
-    # Step 3: update pad net assignments based on schematic netlist.
+    # Step 3: refresh footprint bodies that diverge from their .kicad_mod
+    # template (KiCad GUI's "Update Footprints from Library"). Skip refs we
+    # just added or swapped — those are already canonical.
+    handled = {a["ref"] for a in add_summary["added"]} | {
+        s["ref"] for s in swap_summary["swapped"]
+    }
+    after_refresh_text, refresh_summary = _refresh_footprints_in_memory(
+        after_swap_text, components, project_dir, handled
+    )
+
+    # Step 4: update pad net assignments based on schematic netlist.
     membership = pcb_netlist.parse_net_membership(schematic_netlist_path)
     pad_to_net: dict[tuple[str, str], str] = {}
     for net_name, members in membership.items():
         for ref, pin in members:
             pad_to_net[(ref, pin)] = net_name
 
-    nets_before = _collect_pad_nets(after_swap_text)
+    nets_before = _collect_pad_nets(after_refresh_text)
 
     pad_net_changes: list[dict[str, str]] = []
     pad_net_added: list[dict[str, str]] = []
@@ -1418,8 +1794,8 @@ def sync_from_schematic(
     # Walk every footprint block, rebuild it with rewritten pad nets.
     out_chunks: list[str] = []
     cursor = 0
-    for open_idx, end_idx in _iter_top_blocks(after_swap_text, "footprint"):
-        fp_block = after_swap_text[open_idx:end_idx]
+    for open_idx, end_idx in _iter_top_blocks(after_refresh_text, "footprint"):
+        fp_block = after_refresh_text[open_idx:end_idx]
         m_ref = _re.search(r'\(property\s+"Reference"\s+"([^"]+)"', fp_block)
         if not m_ref:
             continue
@@ -1466,10 +1842,10 @@ def sync_from_schematic(
                     "had_link": "yes" if current_link else "no",
                 })
 
-        out_chunks.append(after_swap_text[cursor:open_idx])
+        out_chunks.append(after_refresh_text[cursor:open_idx])
         out_chunks.append(new_fp_block)
         cursor = end_idx
-    out_chunks.append(after_swap_text[cursor:])
+    out_chunks.append(after_refresh_text[cursor:])
     new_text = "".join(out_chunks)
 
     nets_after = _collect_pad_nets(new_text)
@@ -1494,6 +1870,8 @@ def sync_from_schematic(
     details = dict(add_summary)
     details["swapped"] = swap_summary["swapped"]
     details["swap_skipped"] = swap_summary["swap_skipped"]
+    details["refreshed"] = refresh_summary["refreshed"]
+    details["refresh_skipped"] = refresh_summary["refresh_skipped"]
     details["pad_net_changes"] = pad_net_changes
     details["pad_net_added"] = pad_net_added
     details["link_retrofitted"] = link_retrofitted
