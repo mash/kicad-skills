@@ -88,7 +88,9 @@ Smallest change satisfying the request. Always pass `--dry-run` first via `sch e
 
 Scope of stage 1: connectivity, nets, symbols, pins, values, hierarchy, ERC correctness. Do **not** chase `sch inspect` score, collisions, or wire-corner counts here — that is stage 2.
 
-To spawn a new symbol instance: `sch edit symbol add <sch> <lib_id> <REF> <X,Y>` clones an existing same-`lib_id` sibling (unit 1, unmirrored) so `lib_symbols` stays consistent. For follow-up tweaks use `sch edit symbol set-property` (Value / Footprint / MPN) and `sch edit symbol move` (rotation / position).
+To spawn a new symbol instance: `sch edit symbol add <sch> <lib_id> <REF> <X,Y>` clones an existing same-`lib_id` sibling (unit 1, unmirrored) so `lib_symbols` stays consistent. For a lib_id that isn't yet embedded, pass `--lib-file <library.kicad_sym>` to import the definition and synthesize a fresh instance. For follow-up tweaks use `sch edit symbol set-property` (Value / Footprint / MPN) and `sch edit symbol move` (rotation / position).
+
+To replace an existing symbol with a different `lib_id` (no direct command exists): `sch edit symbol delete <REF>` then `sch edit symbol add <new_lib_id> <REF> <X,Y> [--lib-file ...]`. Pin layout differs, so re-route the wires afterwards.
 
 If the new edit happens to introduce obvious local mess (overlapping label, crossing wire) that blocks reading the diff, fix only that local mess. Anything broader belongs to the cleanup loop.
 
