@@ -155,23 +155,32 @@ def test_pcb_edit_zone_set_polygon_consecutive_duplicate(pcb_zones_fixture):
         )
 
 
+def test_pcb_edit_zone_set_polygon_collinear_zero_area(pcb_zones_fixture):
+    """Three distinct but collinear points yield shoelace area 0 → reject."""
+    with pytest.raises(RuntimeError):
+        run_cli(
+            "pcb", "edit", "zone", "set-polygon",
+            str(pcb_zones_fixture),
+            "--uuid", UUID_GND_F,
+            "0,0", "10,0", "20,0",
+            "--dry-run",
+        )
+
+
 def test_pcb_edit_zone_set_polygon_strips_filled_polygon(pcb_zones_fixture):
-    out = run_cli(
+    # Originally each of the 3 zones in the fixture has one filled_polygon
+    # block (3 total). After set-polygon on one zone, that zone's
+    # filled_polygon must be stripped, leaving 2 occurrences in the file.
+    before = pcb_zones_fixture.read_text(encoding="utf-8").count("(filled_polygon")
+    assert before == 3
+    run_cli(
         "pcb", "edit", "zone", "set-polygon",
         str(pcb_zones_fixture),
         "--uuid", UUID_GND_F,
         "10,10", "20,10", "20,20", "10,20",
-        "--dry-run",
     )
-    # Diff should show the filled_polygon being removed (as deletion lines),
-    # but the new/post version of the zone must not contain a filled_polygon.
-    # Each diff line starts with '+' (added) or '-' (removed). Verify no
-    # added line introduces a filled_polygon for the target zone.
-    added_lines = [
-        ln for ln in out["diff"].splitlines()
-        if ln.startswith("+") and not ln.startswith("+++")
-    ]
-    assert not any("filled_polygon" in ln for ln in added_lines)
+    after = pcb_zones_fixture.read_text(encoding="utf-8").count("(filled_polygon")
+    assert after == 2
 
 
 def test_pcb_edit_zone_add_copy_settings(pcb_zones_fixture):
