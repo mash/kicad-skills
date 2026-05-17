@@ -912,6 +912,17 @@ def cmd_pcb_sync(args: argparse.Namespace) -> int:
         if d.get("refresh_skipped"):
             for r in d["refresh_skipped"]:
                 print(f"  refresh-skip {r['ref']} ({r['reason']})")
+        print(f"units synced: {len(d.get('units_synced', []))}")
+        print(
+            f"pad pinfunc/pintype added: {len(d.get('pad_meta_added', []))} "
+            f"(changed: {len(d.get('pad_meta_changes', []))})"
+        )
+        print(f"properties synced: {len(d.get('property_changes', []))}")
+        print(f"attr flags synced: {len(d.get('attr_changes', []))}")
+        attr_warnings = d.get("attr_warnings", [])
+        if attr_warnings:
+            warn_refs = ", ".join(w.get("ref", "?") for w in attr_warnings)
+            print(f"attr warnings: {len(attr_warnings)} (refs: {warn_refs})")
         if d["unresolved"]:
             print(f"unresolved: {d['unresolved']}")
         if d["skipped_no_footprint"]:

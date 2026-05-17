@@ -1172,6 +1172,140 @@ def _rewrite_pad_net(pad_text: str, indent: str, new_net: str) -> tuple[str, str
     return new_text, None, True
 
 
+_PAD_PINFUNCTION_RE = _re.compile(
+    r'^(\t+)\(pinfunction\s+"([^"]*)"\)\s*\n', _re.MULTILINE
+)
+_PAD_PINTYPE_RE = _re.compile(
+    r'^(\t+)\(pintype\s+"([^"]*)"\)\s*\n', _re.MULTILINE
+)
+
+
+def _rewrite_pad_meta(
+    pad_text: str,
+    indent: str,
+    pinfunction: str | None,
+    pintype: str | None,
+) -> tuple[str, dict[str, Any]]:
+    """Rewrite or insert the ``(pinfunction "...")`` / ``(pintype "...")``
+    lines of a pad. They live between the ``(net ...)`` and ``(uuid ...)``
+    lines (matching the KiCad GUI output order).
+
+    Returns (new_pad_text, info) where ``info`` is a dict with keys
+    ``changes`` (list of {field, old, new}) and ``added`` (dict with the
+    fields that were freshly inserted, e.g. {"pinfunction": "...",
+    "pintype": "..."}). If no edit is required, returns the input string
+    byte-for-byte unchanged and empty changes/added.
+    """
+    info: dict[str, Any] = {"changes": [], "added": {}}
+    if pinfunction is None and pintype is None:
+        return pad_text, info
+
+    inner_indent = indent + "\t"
+    text = pad_text
+
+    # Step 1: in-place replace existing fields (value differs only).
+    needs_insert_pf = pinfunction is not None
+    needs_insert_pt = pintype is not None
+
+    if pinfunction is not None:
+        m = _PAD_PINFUNCTION_RE.search(text)
+        if m:
+            needs_insert_pf = False
+            old = m.group(2)
+            if old != pinfunction:
+                new_line = f'{inner_indent}(pinfunction "{pinfunction}")\n'
+                text = text[: m.start()] + new_line + text[m.end():]
+                info["changes"].append(
+                    {"field": "pinfunction", "old": old, "new": pinfunction}
+                )
+
+    if pintype is not None:
+        m = _PAD_PINTYPE_RE.search(text)
+        if m:
+            needs_insert_pt = False
+            old = m.group(2)
+            if old != pintype:
+                new_line = f'{inner_indent}(pintype "{pintype}")\n'
+                text = text[: m.start()] + new_line + text[m.end():]
+                info["changes"].append(
+                    {"field": "pintype", "old": old, "new": pintype}
+                )
+
+    # Step 2: insert missing fields. Canonical GUI order is
+    # (net ...) → (pinfunction ...) → (pintype ...) → (uuid ...).
+    # When only one of the two sibling fields already exists, anchor the
+    # insert so that order is preserved:
+    #   - inserting pinfunction with pintype present → just BEFORE pintype
+    #   - inserting pintype with pinfunction present → just AFTER pinfunction
+    # When both are missing, insert both after (net ...) in correct order.
+    if needs_insert_pf or needs_insert_pt:
+        if needs_insert_pf and not needs_insert_pt:
+            # pintype already exists — insert pinfunction before it.
+            pt_m = _PAD_PINTYPE_RE.search(text)
+            insert_line = f'{inner_indent}(pinfunction "{pinfunction}")\n'
+            if pt_m:
+                text = text[: pt_m.start()] + insert_line + text[pt_m.start():]
+            else:
+                # Fallback: pintype not found (shouldn't happen given the
+                # flag), insert after (net ...) or before (uuid ...).
+                net_m = _PAD_NET_LINE_RE.search(text)
+                if net_m:
+                    text = text[: net_m.end()] + insert_line + text[net_m.end():]
+                else:
+                    uuid_pat = _re.compile(r'^(\t+)\(uuid\s+"[^"]+"\)\s*\n', _re.MULTILINE)
+                    um = uuid_pat.search(text)
+                    if um:
+                        text = text[: um.start()] + insert_line + text[um.start():]
+                    else:
+                        return pad_text, {"changes": [], "added": {}}
+        elif needs_insert_pt and not needs_insert_pf:
+            # pinfunction already exists — insert pintype after it.
+            pf_m = _PAD_PINFUNCTION_RE.search(text)
+            insert_line = f'{inner_indent}(pintype "{pintype}")\n'
+            if pf_m:
+                text = text[: pf_m.end()] + insert_line + text[pf_m.end():]
+            else:
+                net_m = _PAD_NET_LINE_RE.search(text)
+                if net_m:
+                    text = text[: net_m.end()] + insert_line + text[net_m.end():]
+                else:
+                    uuid_pat = _re.compile(r'^(\t+)\(uuid\s+"[^"]+"\)\s*\n', _re.MULTILINE)
+                    um = uuid_pat.search(text)
+                    if um:
+                        text = text[: um.start()] + insert_line + text[um.start():]
+                    else:
+                        return pad_text, {"changes": [], "added": {}}
+        else:
+            # Both missing — insert both after (net ...) in canonical order.
+            insert_block = (
+                f'{inner_indent}(pinfunction "{pinfunction}")\n'
+                f'{inner_indent}(pintype "{pintype}")\n'
+            )
+            net_m = _PAD_NET_LINE_RE.search(text)
+            if net_m:
+                insert_at = net_m.end()
+                text = text[:insert_at] + insert_block + text[insert_at:]
+            else:
+                uuid_pat = _re.compile(r'^(\t+)\(uuid\s+"[^"]+"\)\s*\n', _re.MULTILINE)
+                um = uuid_pat.search(text)
+                if um:
+                    text = text[: um.start()] + insert_block + text[um.start():]
+                else:
+                    return pad_text, {"changes": [], "added": {}}
+
+        added: dict[str, str] = {}
+        if needs_insert_pf:
+            added["pinfunction"] = pinfunction  # type: ignore[assignment]
+        if needs_insert_pt:
+            added["pintype"] = pintype  # type: ignore[assignment]
+        info["added"] = added
+
+    if not info["changes"] and not info["added"]:
+        # Idempotent: return original string unchanged.
+        return pad_text, info
+    return text, info
+
+
 def _collect_pad_nets(text: str) -> set[str]:
     """Return the set of net names referenced by any pad anywhere in ``text``."""
     out: set[str] = set()
@@ -1263,6 +1397,202 @@ def _inject_link_subforms(new_block: str, link_text: str) -> str:
     if insert_at < len(new_block) and new_block[insert_at] == "\n":
         insert_at += 1
     return new_block[:insert_at] + link_text + new_block[insert_at:]
+
+
+def _render_units_block(units: list[dict[str, Any]], indent: str) -> str:
+    """Render the netlist's flat units representation as a PCB-style
+    ``(units ...)`` block.
+
+    Input: ``[{"name": "A", "pins": ["1", "2"]}, ...]`` (Step 1's flat form).
+    Output PCB form::
+
+        <indent>(units
+        <indent>\t(unit
+        <indent>\t\t(name "A")
+        <indent>\t\t(pins "1" "2")
+        <indent>\t)
+        <indent>)
+
+    Each line ends with a newline. ``indent`` is the leading indent of the
+    outer ``(units`` line (typically two tabs in cupwarmer-hw).
+    """
+    lines: list[str] = [f"{indent}(units\n"]
+    for unit in units:
+        name = unit.get("name", "")
+        pins = unit.get("pins", []) or []
+        lines.append(f"{indent}\t(unit\n")
+        lines.append(f'{indent}\t\t(name "{name}")\n')
+        pin_atoms = " ".join(f'"{p}"' for p in pins)
+        lines.append(f"{indent}\t\t(pins {pin_atoms})\n")
+        lines.append(f"{indent}\t)\n")
+    lines.append(f"{indent})\n")
+    return "".join(lines)
+
+
+def _replace_or_insert_units_block(
+    fp_block: str, ref: str, rendered: str
+) -> tuple[str, str]:
+    """Replace an existing top-level ``(units ...)`` subform of ``fp_block``
+    with ``rendered``, or insert it on the line immediately after the
+    ``(sheetfile "...")`` subform (matching KiCad GUI placement).
+
+    Returns ``(new_text, action)`` where action is one of
+    ``"replaced"``, ``"inserted"``, or ``"unchanged"``. ``ref`` is unused
+    except for diagnostics; kept in the signature per the plan.
+    """
+    fp_off = fp_block.find("(footprint")
+    if fp_off < 0:
+        return fp_block, "unchanged"
+    body_start_inner = _footprint_head_end(fp_block[fp_off:])
+    body_start = fp_off + body_start_inner
+
+    units_span: tuple[int, int] | None = None
+    sheetfile_end: int | None = None
+    for head, oi, ei in _iter_subforms(fp_block, body_start):
+        if head == "units" and units_span is None:
+            units_span = (oi, ei)
+        elif head == "sheetfile":
+            sheetfile_end = ei
+
+    if units_span is not None:
+        s, e = units_span
+        # Expand to consume the line's leading indent and trailing newline so
+        # we splice on whole lines.
+        line_start = fp_block.rfind("\n", 0, s) + 1
+        line_end = e
+        if line_end < len(fp_block) and fp_block[line_end] == "\n":
+            line_end += 1
+        existing = fp_block[line_start:line_end]
+        if existing == rendered:
+            return fp_block, "unchanged"
+        new_text = fp_block[:line_start] + rendered + fp_block[line_end:]
+        return new_text, "replaced"
+
+    if sheetfile_end is None:
+        # No anchor — leave the block alone.
+        return fp_block, "unchanged"
+    insert_at = sheetfile_end
+    if insert_at < len(fp_block) and fp_block[insert_at] == "\n":
+        insert_at += 1
+    new_text = fp_block[:insert_at] + rendered + fp_block[insert_at:]
+    return new_text, "inserted"
+
+
+def _set_fp_property(
+    fp_block: str, name: str, new_value: str
+) -> tuple[str, str | None, str]:
+    """Rewrite the value atom of a top-level ``(property "<name>" "<value>" ...)``
+    subform inside ``fp_block``. All other subforms (at, layer, hide, uuid,
+    effects, ...) are preserved byte-identical.
+
+    Returns ``(new_text, old_value, action)`` where action is one of:
+    - ``"unchanged"``  — property exists and value already equals new_value;
+      output is byte-identical to input.
+    - ``"rewritten"``  — value atom was replaced.
+    - ``"skipped_absent"`` — property not present; output is byte-identical
+      to input and old_value is None.
+    """
+    fp_off = fp_block.find("(footprint")
+    if fp_off < 0:
+        return fp_block, None, "skipped_absent"
+    body_start_inner = _footprint_head_end(fp_block[fp_off:])
+    body_start = fp_off + body_start_inner
+
+    for head, oi, ei in _iter_subforms(fp_block, body_start):
+        if head != "property":
+            continue
+        # Match: (property "<name>" "<value>"  — name and value are quoted
+        # strings (assume no escaped quotes — KiCad doesn't emit them in
+        # these fields in practice).
+        m = _re.match(
+            r'\(property\s+"([^"]+)"\s+"((?:[^"\\]|\\.)*)"',
+            fp_block[oi:ei],
+        )
+        if not m or m.group(1) != name:
+            continue
+        old_value = m.group(2)
+        if old_value == new_value:
+            return fp_block, old_value, "unchanged"
+        # Splice in only the value atom.
+        value_start = oi + m.start(2)
+        value_end = oi + m.end(2)
+        new_text = fp_block[:value_start] + new_value + fp_block[value_end:]
+        return new_text, old_value, "rewritten"
+    return fp_block, None, "skipped_absent"
+
+
+_ATTR_SYNC_WHITELIST = frozenset({
+    "exclude_from_pos_files",
+    "exclude_from_bom",
+    "exclude_from_board",
+    "exclude_from_sim",
+    "dnp",
+})
+
+# Canonical append order — matches KiCad GUI's emitted order.
+_ATTR_SYNC_CANONICAL_ORDER = (
+    "exclude_from_pos_files",
+    "exclude_from_bom",
+    "exclude_from_board",
+    "exclude_from_sim",
+    "dnp",
+)
+
+
+def _sync_attr_tokens(
+    fp_block: str, target_excludes: set[str]
+) -> tuple[str, bool, list[str], list[str]]:
+    """Sync the whitelist tokens inside the footprint header ``(attr ...)``
+    line against ``target_excludes`` (from the schematic netlist).
+
+    - Only tokens in ``_ATTR_SYNC_WHITELIST`` are touched. Non-whitelist
+      tokens (positional ``smd`` / ``through_hole`` / ``virtual``, plus
+      flags like ``allow_soldermask_bridges``) are preserved in their
+      original order.
+    - Missing whitelist tokens are appended in ``_ATTR_SYNC_CANONICAL_ORDER``.
+    - If there is no ``(attr ...)`` line, returns ``(fp_block, False, [], [])``
+      and the caller decides whether to emit a warning.
+    """
+    m = _re.search(r'(?m)^(\t*)\(attr\s+([^()\n]*)\)\s*$', fp_block)
+    if not m:
+        return fp_block, False, [], []
+
+    indent = m.group(1)
+    tokens = m.group(2).split()
+
+    target = set(target_excludes)
+    existing_whitelist = {t for t in tokens if t in _ATTR_SYNC_WHITELIST}
+
+    removed = sorted(existing_whitelist - target)
+    added = [t for t in _ATTR_SYNC_CANONICAL_ORDER if t in target and t not in existing_whitelist]
+
+    # Build new token list: keep order of existing tokens that are either
+    # non-whitelist or whitelist-and-kept; then append new whitelist tokens
+    # in canonical order.
+    kept: list[str] = []
+    seen: set[str] = set()
+    for t in tokens:
+        if t in _ATTR_SYNC_WHITELIST:
+            if t in target and t not in seen:
+                kept.append(t)
+                seen.add(t)
+            # else: dropped
+        else:
+            if t not in seen:
+                kept.append(t)
+                seen.add(t)
+    for t in added:
+        if t not in seen:
+            kept.append(t)
+            seen.add(t)
+
+    new_line = f"{indent}(attr {' '.join(kept)})"
+    old_line = m.group(0)
+    if new_line == old_line:
+        return fp_block, False, [], []
+
+    new_text = fp_block[:m.start()] + new_line + fp_block[m.end():]
+    return new_text, True, added, removed
 
 
 def _remove_link_subforms(block: str) -> str:
@@ -1608,6 +1938,113 @@ def _swap_footprint_libs_in_memory(
     return new_text, {"swapped": swapped, "swap_skipped": swap_skipped}
 
 
+def _extract_pad_pin_meta_map(fp_block: str) -> dict[str, dict[str, str]]:
+    """Per-pad pinfunction / pintype currently present on the board. These are
+    set by ``pcb sync`` (not by the .kicad_mod template) so refresh must carry
+    them over, otherwise they get wiped and re-added every run.
+    """
+    out: dict[str, dict[str, str]] = {}
+    for p_open, p_end, pin, _indent in _iter_pad_blocks_in_footprint(fp_block):
+        pad = fp_block[p_open:p_end]
+        meta: dict[str, str] = {}
+        pf = _PAD_PINFUNCTION_RE.search(pad)
+        if pf:
+            meta["pinfunction"] = pf.group(2)
+        pt = _PAD_PINTYPE_RE.search(pad)
+        if pt:
+            meta["pintype"] = pt.group(2)
+        if meta:
+            out[pin] = meta
+    return out
+
+
+def _apply_pad_pin_meta_map(
+    fp_block: str, pin_to_meta: dict[str, dict[str, str]]
+) -> str:
+    """For each pad, re-apply previously preserved pinfunction/pintype. Pads
+    without preserved meta are left as-is."""
+    if not pin_to_meta:
+        return fp_block
+    out_chunks: list[str] = []
+    cursor = 0
+    for p_open, p_end, pin, indent in _iter_pad_blocks_in_footprint(fp_block):
+        out_chunks.append(fp_block[cursor:p_open])
+        pad_text = fp_block[p_open:p_end]
+        meta = pin_to_meta.get(pin)
+        if meta:
+            new_pad, _info = _rewrite_pad_meta(
+                pad_text, indent, meta.get("pinfunction"), meta.get("pintype")
+            )
+            out_chunks.append(new_pad)
+        else:
+            out_chunks.append(pad_text)
+        cursor = p_end
+    out_chunks.append(fp_block[cursor:])
+    return "".join(out_chunks)
+
+
+def _extract_units_block(fp_block: str) -> str:
+    """Return the full text (including leading indent and trailing newline) of
+    the top-level ``(units ...)`` subform of ``fp_block``, or "" if absent."""
+    fp_off = fp_block.find("(footprint")
+    if fp_off < 0:
+        return ""
+    body_start_inner = _footprint_head_end(fp_block[fp_off:])
+    body_start = fp_off + body_start_inner
+    for head, oi, ei in _iter_subforms(fp_block, body_start):
+        if head != "units":
+            continue
+        line_start = fp_block.rfind("\n", 0, oi) + 1
+        line_end = ei
+        if line_end < len(fp_block) and fp_block[line_end] == "\n":
+            line_end += 1
+        return fp_block[line_start:line_end]
+    return ""
+
+
+def _extract_attr_line(fp_block: str) -> str | None:
+    """Return the existing ``(attr ...)`` line content (everything between the
+    parens), or None when the footprint has no ``(attr ...)`` line."""
+    m = _re.search(r'(?m)^\t*\(attr\s+([^()\n]*)\)\s*$', fp_block)
+    if not m:
+        return None
+    return m.group(1).strip()
+
+
+def _replace_attr_line(fp_block: str, tokens: str) -> str:
+    """Replace the ``(attr ...)`` line's inner tokens with ``tokens`` (a
+    space-separated string). No-op when no ``(attr ...)`` line exists or when
+    the line is already byte-identical."""
+    m = _re.search(r'(?m)^(\t*)\(attr\s+[^()\n]*\)\s*$', fp_block)
+    if not m:
+        return fp_block
+    indent = m.group(1)
+    new_line = f"{indent}(attr {tokens})"
+    if m.group(0) == new_line:
+        return fp_block
+    return fp_block[:m.start()] + new_line + fp_block[m.end():]
+
+
+def _extract_property_value(fp_block: str, name: str) -> str | None:
+    """Return the value atom of a top-level ``(property "<name>" "<value>" ...)``
+    subform, or None when absent."""
+    fp_off = fp_block.find("(footprint")
+    if fp_off < 0:
+        return None
+    body_start_inner = _footprint_head_end(fp_block[fp_off:])
+    body_start = fp_off + body_start_inner
+    for head, oi, ei in _iter_subforms(fp_block, body_start):
+        if head != "property":
+            continue
+        m = _re.match(
+            r'\(property\s+"([^"]+)"\s+"((?:[^"\\]|\\.)*)"',
+            fp_block[oi:ei],
+        )
+        if m and m.group(1) == name:
+            return m.group(2)
+    return None
+
+
 def _refresh_footprints_in_memory(
     text: str,
     components: dict[str, dict[str, Any]],
@@ -1698,6 +2135,18 @@ def _refresh_footprints_in_memory(
         link_text = _extract_link_subforms(block) or _link_subforms_from_comp(comp)
         user_props = _extract_user_property_subforms(block, template_keys)
         pin_to_net = _extract_pad_net_map(block)
+        # Preserve sync-managed state that the .kicad_mod template doesn't
+        # carry: per-pad pinfunction/pintype, the footprint-level (units ...)
+        # block, the (attr ...) line, and the values of Datasheet/Description
+        # properties (since the template's value differs from the schematic's).
+        pin_to_meta = _extract_pad_pin_meta_map(block)
+        preserved_units = _extract_units_block(block)
+        preserved_attr = _extract_attr_line(block)
+        preserved_prop_vals: dict[str, str] = {}
+        for _pkey in ("Datasheet", "Description"):
+            _pval = _extract_property_value(block, _pkey)
+            if _pval is not None:
+                preserved_prop_vals[_pkey] = _pval
 
         # Carry over template-property placements first so the property
         # bodies match the user's positioning before user-property and link
@@ -1708,6 +2157,23 @@ def _refresh_footprints_in_memory(
         refreshed_block = _inject_user_properties(refreshed_block, user_props)
         refreshed_block = _inject_link_subforms(refreshed_block, link_text)
         refreshed_block = _apply_pad_net_map(refreshed_block, pin_to_net)
+        refreshed_block = _apply_pad_pin_meta_map(refreshed_block, pin_to_meta)
+        if preserved_units:
+            refreshed_block, _ = _replace_or_insert_units_block(
+                refreshed_block, ref, preserved_units
+            )
+        if preserved_attr is not None:
+            refreshed_block = _replace_attr_line(refreshed_block, preserved_attr)
+        for _pkey, _pval in preserved_prop_vals.items():
+            refreshed_block, _, _ = _set_fp_property(refreshed_block, _pkey, _pval)
+
+        # fresh_block / refreshed_block ends with a trailing "\n" (added by
+        # _build_footprint_block); the original block excerpt at
+        # [splice_start:end_idx] does NOT include the trailing newline (end_idx
+        # is just past the closing paren). Drop the trailing newline so we
+        # don't accumulate a blank line on every refresh.
+        if refreshed_block.endswith("\n"):
+            refreshed_block = refreshed_block[:-1]
 
         splice_start = (
             open_idx - 1
@@ -1785,11 +2251,19 @@ def sync_from_schematic(
         for ref, pin in members:
             pad_to_net[(ref, pin)] = net_name
 
+    pad_to_meta = pcb_netlist.parse_node_pin_meta(schematic_netlist_path)
+
     nets_before = _collect_pad_nets(after_refresh_text)
 
     pad_net_changes: list[dict[str, str]] = []
     pad_net_added: list[dict[str, str]] = []
+    pad_meta_changes: list[dict[str, str]] = []
+    pad_meta_added: list[dict[str, str]] = []
     link_retrofitted: list[dict[str, str]] = []
+    units_synced: list[dict[str, str]] = []
+    property_changes: list[dict[str, str]] = []
+    attr_changes: list[dict[str, Any]] = []
+    attr_warnings: list[dict[str, Any]] = []
 
     # Walk every footprint block, rebuild it with rewritten pad nets.
     out_chunks: list[str] = []
@@ -1820,6 +2294,30 @@ def sync_from_schematic(
                     pad_net_changes.append({
                         "ref": ref, "pad": pin, "old": old_net, "new": target_net,
                     })
+
+                meta = pad_to_meta.get((ref, pin))
+                if meta is not None:
+                    pinfunc = meta.get("pinfunction")
+                    pintype = meta.get("pintype")
+                    new_pad, meta_info = _rewrite_pad_meta(
+                        new_pad, indent, pinfunc, pintype
+                    )
+                    for ch in meta_info["changes"]:
+                        pad_meta_changes.append({
+                            "ref": ref,
+                            "pad": pin,
+                            "field": ch["field"],
+                            "old": ch["old"],
+                            "new": ch["new"],
+                        })
+                    if meta_info["added"]:
+                        added_entry: dict[str, str] = {"ref": ref, "pad": pin}
+                        if "pinfunction" in meta_info["added"]:
+                            added_entry["pinfunction"] = meta_info["added"]["pinfunction"]
+                        if "pintype" in meta_info["added"]:
+                            added_entry["pintype"] = meta_info["added"]["pintype"]
+                        pad_meta_added.append(added_entry)
+
                 new_fp_chunks.append(new_pad)
             fp_cursor = p_end
         new_fp_chunks.append(fp_block[fp_cursor:])
@@ -1841,6 +2339,69 @@ def sync_from_schematic(
                     "ref": ref,
                     "had_link": "yes" if current_link else "no",
                 })
+
+            # Sync (units ...) header subform (項目 A). Skip footprints with no
+            # symbol-derived units (e.g. mounting holes) or units that exist
+            # but carry no pins.
+            comp_units = comp.get("units") or []
+            if comp_units and not all(not (u.get("pins") or []) for u in comp_units):
+                rendered = _render_units_block(comp_units, "\t\t")
+                new_fp_block, units_action = _replace_or_insert_units_block(
+                    new_fp_block, ref, rendered
+                )
+                if units_action != "unchanged":
+                    units_synced.append({"ref": ref, "action": units_action})
+
+            # Sync Datasheet / Description property values (項目 C). Only the
+            # value atom is rewritten; placement / effects / hide / uuid are
+            # preserved. Missing properties are skipped silently.
+            ds_val = comp.get("datasheet") or ""
+            if ds_val:
+                new_fp_block, ds_old, ds_action = _set_fp_property(
+                    new_fp_block, "Datasheet", ds_val
+                )
+                if ds_action == "rewritten":
+                    property_changes.append({
+                        "ref": ref,
+                        "name": "Datasheet",
+                        "old": ds_old or "",
+                        "new": ds_val,
+                    })
+            desc_val = comp.get("description") or ""
+            if desc_val:
+                new_fp_block, desc_old, desc_action = _set_fp_property(
+                    new_fp_block, "Description", desc_val
+                )
+                if desc_action == "rewritten":
+                    property_changes.append({
+                        "ref": ref,
+                        "name": "Description",
+                        "old": desc_old or "",
+                        "new": desc_val,
+                    })
+
+            # Sync (attr ...) whitelist flags (項目 D).
+            target_excludes = set(comp.get("attr_excludes") or set())
+            has_attr_line = bool(
+                _re.search(r'(?m)^\t*\(attr\s+[^()\n]*\)\s*$', new_fp_block)
+            )
+            if not has_attr_line:
+                if target_excludes:
+                    attr_warnings.append({
+                        "ref": ref,
+                        "target_excludes": sorted(target_excludes),
+                        "reason": "no_attr_block",
+                    })
+            else:
+                new_fp_block, attr_changed, attr_added, attr_removed = _sync_attr_tokens(
+                    new_fp_block, target_excludes
+                )
+                if attr_changed:
+                    attr_changes.append({
+                        "ref": ref,
+                        "added": attr_added,
+                        "removed": attr_removed,
+                    })
 
         out_chunks.append(after_refresh_text[cursor:open_idx])
         out_chunks.append(new_fp_block)
@@ -1874,7 +2435,13 @@ def sync_from_schematic(
     details["refresh_skipped"] = refresh_summary["refresh_skipped"]
     details["pad_net_changes"] = pad_net_changes
     details["pad_net_added"] = pad_net_added
+    details["pad_meta_changes"] = pad_meta_changes
+    details["pad_meta_added"] = pad_meta_added
     details["link_retrofitted"] = link_retrofitted
+    details["units_synced"] = units_synced
+    details["property_changes"] = property_changes
+    details["attr_changes"] = attr_changes
+    details["attr_warnings"] = attr_warnings
     details["orphaned_nets"] = orphaned_nets
 
     return {

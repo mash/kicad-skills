@@ -26,6 +26,37 @@ from sch_netlist import _tokenize, _parse, _is_list_with_head, _find_child, _chi
 KICAD10_FOOTPRINT_DIR_DEFAULT = "/Applications/KiCad/KiCad.app/Contents/SharedSupport/footprints"
 KICAD10_GLOBAL_FP_LIB_TABLE = Path.home() / "Library/Preferences/kicad/10.0/fp-lib-table"
 
+# Whitelist of `attr` exclude flags that the PCB footprint header `(attr ...)`
+# token list mirrors. Anything outside this set is preserved verbatim by Step 5.
+_ATTR_EXCLUDE_FLAGS = frozenset({
+    "exclude_from_bom",
+    "exclude_from_pos_files",
+    "exclude_from_board",
+    "exclude_from_sim",
+    "dnp",
+})
+
+
+def _parse_units_block(units_node: list[Any]) -> list[dict[str, Any]]:
+    """Convert netlist ``(units (unit (name "A") (pins (pin (num "1")) ...)))``
+    into the flat internal representation ``[{name, pins: [str, ...]}, ...]``."""
+    out: list[dict[str, Any]] = []
+    for child in units_node[1:]:
+        if not _is_list_with_head(child, "unit"):
+            continue
+        name = _child_value(child, "name") or ""
+        pins_node = _find_child(child, "pins")
+        pin_nums: list[str] = []
+        if pins_node is not None:
+            for pn in pins_node[1:]:
+                if not _is_list_with_head(pn, "pin"):
+                    continue
+                num = _child_value(pn, "num")
+                if num:
+                    pin_nums.append(num)
+        out.append({"name": name, "pins": pin_nums})
+    return out
+
 
 def parse_components(netlist_path: str | Path) -> dict[str, dict[str, Any]]:
     """Return ``{ref: {value, footprint, libsource}}`` from a kicad netlist."""
@@ -50,14 +81,24 @@ def parse_components(netlist_path: str | Path) -> dict[str, dict[str, Any]]:
             sheet_names = _child_value(sheetpath, "names") or ""
             sheet_tstamps = _child_value(sheetpath, "tstamps") or ""
         # Sheetfile is exposed as a (property (name "Sheetfile") (value "...")).
+        # Also harvest property-Description and the value-less exclude flags in
+        # a single pass over the comp's children.
         sheetfile = ""
+        prop_description = ""
+        attr_excludes: set[str] = set()
         for child in comp[1:]:
-            if (
-                _is_list_with_head(child, "property")
-                and _child_value(child, "name") == "Sheetfile"
-            ):
+            if not _is_list_with_head(child, "property"):
+                continue
+            pname = _child_value(child, "name") or ""
+            if pname == "Sheetfile" and not sheetfile:
                 sheetfile = _child_value(child, "value") or ""
-                break
+            elif pname == "Description" and not prop_description:
+                prop_description = _child_value(child, "value") or ""
+            elif pname in _ATTR_EXCLUDE_FLAGS:
+                # Whitelist-only: the property has no (value ...) child;
+                # presence alone implies the flag is set.
+                if _find_child(child, "value") is None:
+                    attr_excludes.add(pname)
         # Component instance UUID lives at the comp's top level as
         # (tstamps "<uuid>"). Note: there is also a (tstamps ...) inside
         # sheetpath; we want the one OUTSIDE sheetpath.
@@ -66,15 +107,41 @@ def parse_components(netlist_path: str | Path) -> dict[str, dict[str, Any]]:
             if _is_list_with_head(child, "tstamps") and child is not sheetpath:
                 comp_tstamps = _atom_value(child[1]) if len(child) > 1 else ""
                 break
+        # Description: top-level (description "...") wins over property
+        # Description; either may be empty (Step 4 treats empty as skip).
+        top_description = _child_value(comp, "description") or ""
+        description = top_description or prop_description or ""
+
+        # Units: netlist may carry a (units ...) sibling. Parse to flat form.
+        units_node = _find_child(comp, "units")
+        units = _parse_units_block(units_node) if units_node is not None else []
+
+        if ref in out:
+            # Multi-unit symbol case (U1A/U1B emitted as separate comps).
+            # cupwarmer-hw does not exercise this — see plan Step 7 (TBD).
+            existing = out[ref]
+            # Merge units: union by name, keep ordered insertion.
+            seen_names = {u["name"] for u in existing["units"]}
+            for u in units:
+                if u["name"] not in seen_names:
+                    existing["units"].append(u)
+                    seen_names.add(u["name"])
+            existing["attr_excludes"] |= attr_excludes
+            if not existing["description"] and description:
+                existing["description"] = description
+            continue
         out[ref] = {
             "ref": ref,
             "value": _child_value(comp, "value") or "",
             "footprint": _child_value(comp, "footprint") or "",
             "datasheet": _child_value(comp, "datasheet") or "",
+            "description": description,
             "sheet_names": sheet_names,
             "sheet_tstamps": sheet_tstamps,
             "sheetfile": sheetfile,
             "tstamps": comp_tstamps,
+            "units": units,
+            "attr_excludes": attr_excludes,
         }
     return out
 
@@ -101,6 +168,45 @@ def parse_net_membership(netlist_path: str | Path) -> dict[str, list[tuple[str, 
                 members.append((ref, pin))
         members.sort()
         out[name] = members
+    return out
+
+
+def parse_node_pin_meta(
+    netlist_path: str | Path,
+) -> dict[tuple[str, str], dict[str, str]]:
+    """Return ``{(ref, pin): {pinfunction, pintype}}`` from the ``(nets ...)``
+    block.
+
+    Mirrors :func:`parse_net_membership`'s walk but harvests the per-node
+    ``(pinfunction "...")`` / ``(pintype "...")`` siblings. Entries are only
+    emitted when at least one of the two values is present.
+    """
+    text = Path(netlist_path).read_text(encoding="utf-8")
+    tree, _ = _parse(_tokenize(text), 0)
+    nets = _find_child(tree, "nets")
+    out: dict[tuple[str, str], dict[str, str]] = {}
+    if nets is None:
+        return out
+    for net in nets[1:]:
+        if not _is_list_with_head(net, "net"):
+            continue
+        for n in net[1:]:
+            if not _is_list_with_head(n, "node"):
+                continue
+            ref = _child_value(n, "ref") or ""
+            pin = _child_value(n, "pin") or ""
+            if not (ref and pin):
+                continue
+            pinfunction = _child_value(n, "pinfunction")
+            pintype = _child_value(n, "pintype")
+            if pinfunction is None and pintype is None:
+                continue
+            entry: dict[str, str] = {}
+            if pinfunction is not None:
+                entry["pinfunction"] = pinfunction
+            if pintype is not None:
+                entry["pintype"] = pintype
+            out[(ref, pin)] = entry
     return out
 
 
@@ -171,6 +277,7 @@ def resolve_footprint_path(lib_id: str, project_dir: Path) -> Path | None:
 __all__ = [
     "parse_components",
     "parse_net_membership",
+    "parse_node_pin_meta",
     "load_fp_lib_table",
     "resolve_footprint_path",
 ]
