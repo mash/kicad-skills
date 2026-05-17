@@ -2267,7 +2267,8 @@ def _build_zone_block(
     depth-2 = two tabs). The block itself has no leading tab; callers are
     expected to splice it in at depth 1 with the surrounding newline+tab.
 
-    If ``settings_tail`` is non-empty, it is spliced in after the polygon.
+    If ``settings_tail`` is non-empty, it is spliced in before the polygon
+    (matches KiCad's canonical zone layout: settings precede geometry).
     If ``priority`` is None, the ``(priority ...)`` line is omitted.
     If ``name`` is None, the ``(name ...)`` line is omitted.
     """
@@ -2284,20 +2285,559 @@ def _build_zone_block(
     if priority is not None:
         lines.append(f"\t\t(priority {int(priority)})")
 
-    # Polygon (outline).
-    poly_lines: list[str] = []
-    poly_lines.append("\t\t(polygon")
-    poly_lines.append("\t\t\t(pts")
-    for x, y in polygon_points:
-        poly_lines.append(f"\t\t\t\t(xy {_fmt_coord(x)} {_fmt_coord(y)})")
-    poly_lines.append("\t\t\t)")
-    poly_lines.append("\t\t)")
-    lines.extend(poly_lines)
-
     head = "\n".join(lines)
     # Settings tail (already contains its own leading newline + indent per
-    # kept subform). Append as-is, then close the zone form.
-    return head + settings_tail + "\n\t)"
+    # kept subform). Splice it in BEFORE the polygon so the resulting block
+    # matches KiCad's canonical layout (hatch / connect_pads / min_thickness
+    # / fill all precede the polygon outline).
+
+    # Polygon (outline) — pts on a single line, matching KiCad's emitted
+    # canonical form. Avoids re-format churn after the next KiCad save.
+    xy_tokens = " ".join(
+        f"(xy {_fmt_coord(x)} {_fmt_coord(y)})" for x, y in polygon_points
+    )
+    poly_block = "\n".join(
+        [
+            "\t\t(polygon",
+            f"\t\t\t(pts {xy_tokens})",
+            "\t\t)",
+        ]
+    )
+
+    return head + settings_tail + "\n" + poly_block + "\n\t)"
+
+
+# ---------------------------------------------------------------------------
+# Zone edit operations
+# ---------------------------------------------------------------------------
+
+
+def _zone_selector_args(
+    *, uuid: str | None, name: str | None, net: str | None, layer: str | None
+) -> dict[str, str | None]:
+    """Normalize the selector kwargs for ``_locate_zone``."""
+    return {"uuid": uuid, "name": name, "net": net, "layer": layer}
+
+
+def _splice_zone_block(text: str, open_idx: int, end_idx: int, new_block: str) -> str:
+    """Replace text[open_idx:end_idx] (a zone block) with new_block."""
+    return text[:open_idx] + new_block + text[end_idx:]
+
+
+def _replace_polygon_pts(block: str, points: list[tuple[float, float]]) -> str:
+    """Replace the first top-level ``(polygon (pts ...))`` inside a zone block
+    with a new polygon containing ``points``. Preserves indentation."""
+    if not block.startswith("(zone"):
+        raise ValueError("not a zone block")
+    body_start = len("(zone")
+    n = len(block)
+    i = body_start
+    while i < n:
+        c = block[i]
+        if c == ")":
+            break
+        if c != "(":
+            i += 1
+            continue
+        end_idx = _find_block_end(block, i)
+        sub = block[i:end_idx]
+        if sub.startswith("(polygon"):
+            # Determine indent (whitespace at start of this line).
+            line_start = block.rfind("\n", 0, i) + 1
+            indent = block[line_start:i]
+            body_indent = indent + "\t"
+            # Emit pts on a single line, matching KiCad's canonical form.
+            xy_tokens = " ".join(
+                f"(xy {_fmt_coord(x)} {_fmt_coord(y)})" for x, y in points
+            )
+            new_poly = "\n".join(
+                [
+                    "(polygon",
+                    f"{body_indent}(pts {xy_tokens})",
+                    f"{indent})",
+                ]
+            )
+            return block[:i] + new_poly + block[end_idx:]
+        i = end_idx
+    raise ValueError("zone has no (polygon ...) outline subform")
+
+
+def _check_polygon_valid(points: list[tuple[float, float]]) -> dict[str, Any]:
+    """Validate a polygon outline. Returns details (area_mm2, warnings).
+
+    Raises ``ValueError`` on degenerate input (<3 points, area 0, or
+    consecutive duplicate points). Self-intersection is reported as a
+    warning entry, not an error.
+    """
+    if len(points) < 3:
+        raise ValueError(f"polygon needs at least 3 points, got {len(points)}")
+    for i in range(len(points)):
+        if points[i] == points[(i + 1) % len(points)]:
+            raise ValueError(
+                f"polygon has consecutive duplicate point at index {i}: {points[i]}"
+            )
+    area = _zone_area_mm2(points)
+    if area == 0.0:
+        raise ValueError("polygon has zero area (collinear / degenerate)")
+    warnings: list[str] = []
+    if _polygon_self_intersects(points):
+        msg = "polygon outline appears to self-intersect"
+        sys.stderr.write(f"WARNING: {msg}\n")
+        warnings.append(msg)
+    return {"area_mm2": area, "warnings": warnings}
+
+
+def _segments_cross(
+    a1: tuple[float, float],
+    a2: tuple[float, float],
+    b1: tuple[float, float],
+    b2: tuple[float, float],
+) -> bool:
+    """Proper segment-crossing test (shared endpoints don't count)."""
+    def cross(o, p, q):
+        return (p[0] - o[0]) * (q[1] - o[1]) - (p[1] - o[1]) * (q[0] - o[0])
+    if a1 == b1 or a1 == b2 or a2 == b1 or a2 == b2:
+        return False
+    d1 = cross(b1, b2, a1)
+    d2 = cross(b1, b2, a2)
+    d3 = cross(a1, a2, b1)
+    d4 = cross(a1, a2, b2)
+    if ((d1 > 0 and d2 < 0) or (d1 < 0 and d2 > 0)) and (
+        (d3 > 0 and d4 < 0) or (d3 < 0 and d4 > 0)
+    ):
+        return True
+    return False
+
+
+def _polygon_self_intersects(points: list[tuple[float, float]]) -> bool:
+    n = len(points)
+    if n < 4:
+        return False
+    edges = [(points[i], points[(i + 1) % n]) for i in range(n)]
+    for i in range(n):
+        for j in range(i + 1, n):
+            # skip adjacent edges (share a vertex)
+            if j == i + 1 or (i == 0 and j == n - 1):
+                continue
+            if _segments_cross(edges[i][0], edges[i][1], edges[j][0], edges[j][1]):
+                return True
+    return False
+
+
+def set_zone_polygon(
+    pcb_path: str | Path,
+    *,
+    uuid: str | None = None,
+    name: str | None = None,
+    net: str | None = None,
+    layer: str | None = None,
+    points: list[tuple[float, float]],
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Replace a zone's polygon outline points.
+
+    Strips all stale ``(filled_polygon ...)`` sub-blocks after the edit; refill
+    is expected to be handled downstream (KiCad CLI / DRC). The zone's uuid,
+    name, net, layer, settings, and priority are preserved.
+    """
+    pcb_path = Path(pcb_path)
+    text = _read(pcb_path)
+
+    open_idx, end_idx, block = _locate_zone(
+        text, **_zone_selector_args(uuid=uuid, name=name, net=net, layer=layer)
+    )
+
+    info = _check_polygon_valid(points)
+
+    new_block = _replace_polygon_pts(block, points)
+    new_block = _strip_filled_polygon(new_block)
+    new_text = _splice_zone_block(text, open_idx, end_idx, new_block)
+
+    changed = _maybe_write(pcb_path, text, new_text, dry_run)
+    return {
+        "action": "set_zone_polygon",
+        "changed": changed,
+        "diff": _diff(text, new_text, pcb_path),
+        "details": {
+            "uuid": _zone_uuid(new_block),
+            "name": _zone_name(new_block),
+            "layer": _zone_layer(new_block),
+            "points": [[x, y] for (x, y) in points],
+            "area_mm2": info["area_mm2"],
+            "warnings": info["warnings"],
+        },
+    }
+
+
+def _validate_layer(text: str, layer: str) -> None:
+    """Ensure ``layer`` appears as a defined layer in the board's
+    ``(layers ...)`` block. Raises ``ValueError`` if unknown."""
+    m = re.search(r"^\t\(layers\b", text, re.MULTILINE)
+    if not m:
+        raise ValueError("board has no (layers ...) declaration")
+    open_idx = m.start() + 1
+    end_idx = _find_block_end(text, open_idx)
+    layers_text = text[open_idx:end_idx]
+    names = re.findall(r'"([^"]+)"', layers_text)
+    if layer not in names:
+        raise ValueError(
+            f"unknown layer {layer!r}; defined layers: {', '.join(names)}"
+        )
+
+
+def _find_last_top_block_end(text: str, token: str) -> int | None:
+    last_end: int | None = None
+    for _open_idx, end_idx in _iter_top_blocks(text, token):
+        last_end = end_idx
+    return last_end
+
+
+def _kicad_pcb_outer_close(text: str) -> int:
+    """Index of the closing ``)`` of the outer ``(kicad_pcb ...)`` form."""
+    m = re.search(r"\(kicad_pcb\b", text)
+    if not m:
+        raise ValueError("not a kicad_pcb file (no (kicad_pcb ...) header)")
+    end_idx = _find_block_end(text, m.start())
+    return end_idx - 1  # position of the final ')'
+
+
+def add_zone(
+    pcb_path: str | Path,
+    net: str,
+    layer: str,
+    points: list[tuple[float, float]],
+    *,
+    copy_settings_from_uuid: str | None = None,
+    name: str | None = None,
+    priority: int | None = None,
+    clearance: float | None = None,
+    min_thickness: float | None = None,
+    thermal_gap: float | None = None,
+    thermal_bridge_width: float | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Add a new ``(zone ...)`` block to the board.
+
+    Two settings sources:
+
+    - ``copy_settings_from_uuid`` (primary): copy every non-identity subform
+      from the named source zone (clearance, fill, hatch, connect_pads, ...).
+    - explicit flags (secondary): build a minimal default settings tail with
+      the provided values. Requires at least one of ``clearance``, ``min_thickness``,
+      ``thermal_gap``, ``thermal_bridge_width`` to be supplied so the caller
+      cannot accidentally create a zone with no settings.
+    """
+    pcb_path = Path(pcb_path)
+    text = _read(pcb_path)
+
+    info = _check_polygon_valid(points)
+    _validate_layer(text, layer)
+
+    net_id = _resolve_net_id(text, net)
+    if net_id is None:
+        raise ValueError(f"unknown net {net!r}; add it to the netlist first")
+
+    source_uuid: str | None = None
+    settings_tail: str = ""
+    if copy_settings_from_uuid is not None:
+        _o, _e, src_block = _locate_zone(text, uuid=copy_settings_from_uuid)
+        settings_tail = _zone_settings_for_copy(src_block)
+        source_uuid = copy_settings_from_uuid
+        # Always strip any inherited (priority ...) from the copied tail so
+        # _build_zone_block's explicit ``priority`` arg is the single source
+        # of truth. If the caller did not pass --priority, fall back to the
+        # source zone's priority value.
+        inherited_priority_match = re.search(
+            r"\n[\t ]*\(priority\s+(-?\d+)\s*\)",
+            settings_tail,
+        )
+        settings_tail = re.sub(
+            r"\n[\t ]*\(priority\s+-?\d+\s*\)",
+            "",
+            settings_tail,
+        )
+        if priority is None and inherited_priority_match is not None:
+            priority = int(inherited_priority_match.group(1))
+    else:
+        explicit_any = any(
+            v is not None
+            for v in (clearance, min_thickness, thermal_gap, thermal_bridge_width)
+        )
+        if not explicit_any:
+            raise ValueError(
+                "either --copy-settings-from-uuid or at least one explicit setting "
+                "(--clearance / --min-thickness / --thermal-gap / --thermal-bridge-width) "
+                "must be provided"
+            )
+        # Build a minimal default settings tail in the same indent style as
+        # _build_zone_block emits (two-tab body).
+        tail_lines: list[str] = []
+        tail_lines.append("\t\t(hatch edge 0.5)")
+        clr = clearance if clearance is not None else 0.5
+        mt = min_thickness if min_thickness is not None else 0.25
+        tg = thermal_gap if thermal_gap is not None else 0.5
+        tbw = thermal_bridge_width if thermal_bridge_width is not None else 0.5
+        tail_lines.append("\t\t(connect_pads yes")
+        tail_lines.append(f"\t\t\t(clearance {_fmt_coord(clr)})")
+        tail_lines.append("\t\t)")
+        tail_lines.append(f"\t\t(min_thickness {_fmt_coord(mt)})")
+        tail_lines.append("\t\t(fill yes")
+        tail_lines.append(f"\t\t\t(thermal_gap {_fmt_coord(tg)})")
+        tail_lines.append(f"\t\t\t(thermal_bridge_width {_fmt_coord(tbw)})")
+        tail_lines.append("\t\t\t(island_removal_mode 0)")
+        tail_lines.append("\t\t)")
+        # _build_zone_block puts settings_tail BEFORE the closing of the zone;
+        # each kept line needs its own leading newline (matches _zone_settings_for_copy).
+        settings_tail = "".join("\n" + ln for ln in tail_lines)
+
+    new_uuid = _det_uuid(f"zone:{net}:{layer}:{points!r}")
+
+    new_block_body = _build_zone_block(
+        uuid=new_uuid,
+        name=name,
+        net_id=net_id,
+        net_name=net,
+        layer=layer,
+        priority=priority,
+        settings_tail=settings_tail,
+        polygon_points=points,
+    )
+
+    # Insert: prefer right after the last existing zone (depth-1, single tab
+    # leading indent). If no zones exist, insert just before the closing ')'
+    # of the (kicad_pcb ...) form.
+    last_zone_end = _find_last_top_block_end(text, "zone")
+    if last_zone_end is not None:
+        # Insert "\n\t<new_block_body>" right after the last zone, then the
+        # existing newline after the previous zone (if any) is preserved.
+        # _build_zone_block returns "(zone\n\t\t...\n\t)" — depth-1 indent
+        # supplied by us.
+        insertion = "\n\t" + new_block_body
+        # last_zone_end points just past ')' of last zone — usually followed by '\n'.
+        new_text = text[:last_zone_end] + insertion + text[last_zone_end:]
+    else:
+        close_idx = _kicad_pcb_outer_close(text)
+        insertion = "\t" + new_block_body + "\n"
+        new_text = text[:close_idx] + insertion + text[close_idx:]
+
+    changed = _maybe_write(pcb_path, text, new_text, dry_run)
+    details: dict[str, Any] = {
+        "uuid": new_uuid,
+        "name": name,
+        "layer": layer,
+        "net": net,
+        "area_mm2": info["area_mm2"],
+        "warnings": info["warnings"],
+    }
+    if source_uuid is not None:
+        details["source_uuid"] = source_uuid
+    return {
+        "action": "add_zone",
+        "changed": changed,
+        "diff": _diff(text, new_text, pcb_path),
+        "details": details,
+    }
+
+
+def delete_zone(
+    pcb_path: str | Path,
+    *,
+    uuid: str | None = None,
+    name: str | None = None,
+    net: str | None = None,
+    layer: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Delete a single ``(zone ...)`` block. Tracks/vias/other zones are
+    untouched."""
+    pcb_path = Path(pcb_path)
+    text = _read(pcb_path)
+
+    open_idx, end_idx, block = _locate_zone(
+        text, **_zone_selector_args(uuid=uuid, name=name, net=net, layer=layer)
+    )
+
+    details = {
+        "uuid": _zone_uuid(block),
+        "name": _zone_name(block),
+        "layer": _zone_layer(block),
+        "net": _zone_net_name(block),
+    }
+
+    # Drop the leading tab+newline so we don't leave an orphan blank line.
+    line_start = text.rfind("\n", 0, open_idx) + 1
+    leading_ws = text[line_start:open_idx]
+    cut_start = open_idx - len(leading_ws) if leading_ws.strip() == "" else open_idx
+    cut_end = end_idx
+    if cut_end < len(text) and text[cut_end] == "\n":
+        cut_end += 1
+
+    new_text = text[:cut_start] + text[cut_end:]
+
+    changed = _maybe_write(pcb_path, text, new_text, dry_run)
+    return {
+        "action": "delete_zone",
+        "changed": changed,
+        "diff": _diff(text, new_text, pcb_path),
+        "details": details,
+    }
+
+
+_ZONE_PROPERTY_KEYS = (
+    "priority",
+    "clearance",
+    "min_thickness",
+    "thermal_gap",
+    "thermal_bridge_width",
+    "name",
+)
+
+
+def _set_top_zone_field(block: str, key: str, formatted_value: str) -> tuple[str, str | None]:
+    """Replace the value of a single top-level ``(key ...)`` subform in a zone
+    block. Returns (new_block, old_value_string_or_None). Raises ValueError
+    if the subform is absent."""
+    if not block.startswith("(zone"):
+        raise ValueError("not a zone block")
+    body_start = len("(zone")
+    n = len(block)
+    i = body_start
+    while i < n:
+        c = block[i]
+        if c == ")":
+            break
+        if c != "(":
+            i += 1
+            continue
+        end_idx = _find_block_end(block, i)
+        sub = block[i:end_idx]
+        m = re.match(r"\(([A-Za-z_][A-Za-z0-9_]*)", sub)
+        if m and m.group(1) == key:
+            old = sub
+            new_sub = f"({key} {formatted_value})"
+            return block[:i] + new_sub + block[end_idx:], old
+        i = end_idx
+    raise ValueError(f"zone has no top-level ({key} ...) subform")
+
+
+def _set_nested_zone_field(
+    block: str, parent_key: str, key: str, formatted_value: str
+) -> tuple[str, str | None]:
+    """Replace the value of a ``(key ...)`` subform nested inside a top-level
+    ``(parent_key ...)`` subform of a zone block."""
+    if not block.startswith("(zone"):
+        raise ValueError("not a zone block")
+    body_start = len("(zone")
+    n = len(block)
+    i = body_start
+    while i < n:
+        c = block[i]
+        if c == ")":
+            break
+        if c != "(":
+            i += 1
+            continue
+        end_idx = _find_block_end(block, i)
+        sub = block[i:end_idx]
+        m = re.match(r"\(([A-Za-z_][A-Za-z0-9_]*)", sub)
+        if m and m.group(1) == parent_key:
+            inner_pat = re.compile(
+                r"\(" + re.escape(key) + r"\s+([^()\s]+)\s*\)"
+            )
+            inner_m = inner_pat.search(sub)
+            if not inner_m:
+                raise ValueError(
+                    f"zone ({parent_key} ...) has no inner ({key} ...) field"
+                )
+            old = inner_m.group(1)
+            new_sub = sub[: inner_m.start()] + f"({key} {formatted_value})" + sub[inner_m.end():]
+            return block[:i] + new_sub + block[end_idx:], old
+        i = end_idx
+    raise ValueError(f"zone has no top-level ({parent_key} ...) subform")
+
+
+def set_zone_property(
+    pcb_path: str | Path,
+    *,
+    uuid: str | None = None,
+    name: str | None = None,
+    key: str,
+    value: Any,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Set a single scalar property on a zone. Settings changes invalidate
+    any existing fill, so ``(filled_polygon ...)`` blocks are stripped."""
+    if key not in _ZONE_PROPERTY_KEYS:
+        raise ValueError(
+            f"unsupported zone property {key!r}; choose from {_ZONE_PROPERTY_KEYS}"
+        )
+    # net+layer selector is intentionally not supported here; the plan
+    # restricts this command to uuid/name.
+    if (uuid is None) == (name is None):
+        raise ValueError("exactly one of {uuid, name} must be specified")
+
+    pcb_path = Path(pcb_path)
+    text = _read(pcb_path)
+
+    open_idx, end_idx, block = _locate_zone(text, uuid=uuid, name=name)
+
+    new_block: str
+    old_value: str | None
+    if key == "name":
+        new_value = str(value)
+        esc = new_value.replace("\\", "\\\\").replace('"', '\\"')
+        new_block, old_value = _set_top_zone_field(block, "name", f'"{esc}"')
+        # Strip surrounding quotes for the reported old value.
+        if old_value:
+            mq = re.match(r'\(name\s+"((?:[^"\\]|\\.)*)"\s*\)', old_value)
+            old_value = mq.group(1) if mq else old_value
+    elif key == "priority":
+        ivalue = int(value)
+        new_block, old_value = _set_top_zone_field(block, "priority", str(ivalue))
+        if old_value:
+            mp = re.match(r"\(priority\s+(-?\d+)\s*\)", old_value)
+            old_value = mp.group(1) if mp else old_value
+    elif key == "min_thickness":
+        fvalue = float(value)
+        new_block, old_value = _set_top_zone_field(
+            block, "min_thickness", _fmt_coord(fvalue)
+        )
+        if old_value:
+            mt = re.match(r"\(min_thickness\s+(-?[\d.]+)\s*\)", old_value)
+            old_value = mt.group(1) if mt else old_value
+    elif key == "clearance":
+        fvalue = float(value)
+        new_block, old_value = _set_nested_zone_field(
+            block, "connect_pads", "clearance", _fmt_coord(fvalue)
+        )
+    elif key == "thermal_gap":
+        fvalue = float(value)
+        new_block, old_value = _set_nested_zone_field(
+            block, "fill", "thermal_gap", _fmt_coord(fvalue)
+        )
+    elif key == "thermal_bridge_width":
+        fvalue = float(value)
+        new_block, old_value = _set_nested_zone_field(
+            block, "fill", "thermal_bridge_width", _fmt_coord(fvalue)
+        )
+    else:  # pragma: no cover — guarded by whitelist
+        raise ValueError(f"unsupported key {key!r}")
+
+    new_block = _strip_filled_polygon(new_block)
+    new_text = _splice_zone_block(text, open_idx, end_idx, new_block)
+
+    changed = _maybe_write(pcb_path, text, new_text, dry_run)
+    return {
+        "action": "set_zone_property",
+        "changed": changed,
+        "diff": _diff(text, new_text, pcb_path),
+        "details": {
+            "uuid": _zone_uuid(new_block),
+            "key": key,
+            "old": old_value,
+            "new": value,
+        },
+    }
 
 
 __all__ = [
@@ -2307,4 +2847,8 @@ __all__ = [
     "delete_footprint",
     "import_footprints",
     "sync_from_schematic",
+    "set_zone_polygon",
+    "add_zone",
+    "delete_zone",
+    "set_zone_property",
 ]

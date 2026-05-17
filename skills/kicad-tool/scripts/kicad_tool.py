@@ -654,6 +654,120 @@ def cmd_pcb_edit_footprint_delete(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# pcb zone query / edit handlers
+# ---------------------------------------------------------------------------
+
+
+def _zone_selector_kwargs(args: argparse.Namespace) -> dict[str, Any]:
+    """Pull --uuid / --name / --net / --layer selector flags off the parsed
+    args. Performs the same mutex validation that `_locate_zone` does, so
+    we surface argparse-style errors before opening the file.
+    """
+    uuid = getattr(args, "uuid", None)
+    name = getattr(args, "name", None)
+    net = getattr(args, "net", None)
+    layer = getattr(args, "layer", None)
+    active = sum(
+        1
+        for x in (
+            uuid is not None,
+            name is not None,
+            net is not None or layer is not None,
+        )
+        if x
+    )
+    if active != 1:
+        raise ValueError(
+            "exactly one of --uuid, --name, or (--net + --layer) must be specified"
+        )
+    if (net is not None) != (layer is not None):
+        raise ValueError("--net and --layer must be used together")
+    return {"uuid": uuid, "name": name, "net": net, "layer": layer}
+
+
+def cmd_pcb_query_zone(args: argparse.Namespace) -> int:
+    kwargs = _zone_selector_kwargs(args)
+    return _emit_query(args, pcb_query.query_zone(args.board, **kwargs))
+
+
+def _parse_polygon_points(raw: list[str]) -> list[tuple[float, float]]:
+    pts: list[tuple[float, float]] = []
+    for token in raw:
+        x, y = parse_xy(token)
+        pts.append((x, y))
+    if len(pts) < 3:
+        raise ValueError(
+            f"polygon needs at least 3 points, got {len(pts)}"
+        )
+    return pts
+
+
+def cmd_pcb_edit_zone_set_polygon(args: argparse.Namespace) -> int:
+    kwargs = _zone_selector_kwargs(args)
+    points = _parse_polygon_points(args.points)
+    res = pcb_edit.set_zone_polygon(
+        args.board,
+        points=points,
+        dry_run=args.dry_run,
+        **kwargs,
+    )
+    return _emit_edit(args, res)
+
+
+def cmd_pcb_edit_zone_add(args: argparse.Namespace) -> int:
+    points = _parse_polygon_points(args.points)
+    res = pcb_edit.add_zone(
+        args.board,
+        args.net,
+        args.layer,
+        points,
+        copy_settings_from_uuid=args.copy_settings_from_uuid,
+        name=args.name,
+        priority=args.priority,
+        clearance=args.clearance,
+        min_thickness=args.min_thickness,
+        thermal_gap=args.thermal_gap,
+        thermal_bridge_width=args.thermal_bridge_width,
+        dry_run=args.dry_run,
+    )
+    return _emit_edit(args, res)
+
+
+def cmd_pcb_edit_zone_delete(args: argparse.Namespace) -> int:
+    kwargs = _zone_selector_kwargs(args)
+    res = pcb_edit.delete_zone(
+        args.board,
+        dry_run=args.dry_run,
+        **kwargs,
+    )
+    return _emit_edit(args, res)
+
+
+def cmd_pcb_edit_zone_set_property(args: argparse.Namespace) -> int:
+    uuid = getattr(args, "uuid", None)
+    name = getattr(args, "name", None)
+    if (uuid is None) == (name is None):
+        raise ValueError("exactly one of --uuid or --name must be specified")
+    key = args.key
+    raw_value = args.value
+    if key == "priority":
+        value: Any = int(raw_value)
+    elif key == "name":
+        value = str(raw_value)
+    else:
+        value = float(raw_value)
+    res = pcb_edit.set_zone_property(
+        args.board,
+        uuid=uuid,
+        name=name,
+        key=key,
+        value=value,
+        dry_run=args.dry_run,
+    )
+    return _emit_edit(args, res)
+
+
+# ---------------------------------------------------------------------------
 # pcb sync / pcb validate
 # ---------------------------------------------------------------------------
 
@@ -1224,6 +1338,7 @@ def cmd_sch_edit_symbol_add(args: argparse.Namespace) -> int:
         ref=args.ref,
         at=args.at,
         dry_run=args.dry_run,
+        lib_file=args.lib_file,
     )
     return _emit_edit(args, res)
 
@@ -1446,6 +1561,10 @@ def _add_edit_subparsers(sch_commands) -> None:
     p.add_argument("lib_id", help='e.g. "Device:C"')
     p.add_argument("ref", help="new reference, e.g. C42")
     p.add_argument("at", type=parse_xy, help="X,Y in schematic coords")
+    p.add_argument(
+        "--lib-file", dest="lib_file", type=Path, default=None,
+        help="external .kicad_sym to import lib_id from if not already embedded",
+    )
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--format", choices=["text", "json"], default="text")
     p.set_defaults(func=cmd_sch_edit_symbol_add)
@@ -1692,6 +1811,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--format", choices=["json", "text"], default="text")
     p.set_defaults(func=cmd_pcb_query_region)
 
+    p = pcb_qsub.add_parser(
+        "zone",
+        help="query a single zone by uuid, name, or (net + layer)",
+    )
+    p.add_argument("board", type=Path)
+    p.add_argument("--uuid", default=None, help="zone uuid")
+    p.add_argument("--name", default=None, help="zone name")
+    p.add_argument("--net", default=None, help="zone net name (requires --layer)")
+    p.add_argument("--layer", default=None, help="zone layer (only with --net)")
+    p.add_argument("--format", choices=["json", "text"], default="text")
+    p.set_defaults(func=cmd_pcb_query_zone)
+
     # PCB edit subtree
     pcb_edit_parser = pcb_commands.add_parser("edit", help="PCB structural edits")
     pcb_esub = pcb_edit_parser.add_subparsers(dest="pcb_edit_element", required=True)
@@ -1753,6 +1884,88 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--format", choices=["json", "text"], default="text")
     p.set_defaults(func=cmd_pcb_edit_footprint_delete)
+
+    # zone edits
+    zn = pcb_esub.add_parser("zone", help="edit a zone (copper pour)")
+    zn_act = zn.add_subparsers(dest="pcb_edit_action", required=True)
+
+    p = zn_act.add_parser(
+        "set-polygon",
+        help="replace a zone's polygon outline points",
+    )
+    p.add_argument("board", type=Path)
+    p.add_argument("--uuid", default=None, help="zone uuid")
+    p.add_argument("--name", default=None, help="zone name")
+    p.add_argument("--net", default=None, help="zone net name (with --layer)")
+    p.add_argument("--layer", default=None, help="zone layer (with --net)")
+    p.add_argument(
+        "points",
+        nargs="+",
+        help="polygon vertices as X,Y (at least 3)",
+    )
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--format", choices=["json", "text"], default="text")
+    p.set_defaults(func=cmd_pcb_edit_zone_set_polygon)
+
+    p = zn_act.add_parser(
+        "add",
+        help="add a new zone (copper pour)",
+    )
+    p.add_argument("board", type=Path)
+    p.add_argument("net", help="net name (must exist in netlist)")
+    p.add_argument("layer", help="layer name (e.g. F.Cu, B.Cu)")
+    p.add_argument(
+        "points",
+        nargs="+",
+        help="polygon vertices as X,Y (at least 3)",
+    )
+    p.add_argument("--copy-settings-from-uuid", default=None,
+                   help="copy settings from an existing zone (primary path)")
+    p.add_argument("--name", default=None, help="zone name (optional)")
+    p.add_argument("--priority", type=int, default=None)
+    p.add_argument("--clearance", type=float, default=None)
+    p.add_argument("--min-thickness", type=float, default=None)
+    p.add_argument("--thermal-gap", type=float, default=None)
+    p.add_argument("--thermal-bridge-width", type=float, default=None)
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--format", choices=["json", "text"], default="text")
+    p.set_defaults(func=cmd_pcb_edit_zone_add)
+
+    p = zn_act.add_parser(
+        "delete",
+        help="delete a zone by uuid, name, or (net + layer)",
+    )
+    p.add_argument("board", type=Path)
+    p.add_argument("--uuid", default=None, help="zone uuid")
+    p.add_argument("--name", default=None, help="zone name")
+    p.add_argument("--net", default=None, help="zone net name (with --layer)")
+    p.add_argument("--layer", default=None, help="zone layer (with --net)")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--format", choices=["json", "text"], default="text")
+    p.set_defaults(func=cmd_pcb_edit_zone_delete)
+
+    p = zn_act.add_parser(
+        "set-property",
+        help="set a single zone property",
+    )
+    p.add_argument("board", type=Path)
+    p.add_argument("--uuid", default=None, help="zone uuid")
+    p.add_argument("--name", default=None, help="zone name")
+    p.add_argument(
+        "key",
+        choices=[
+            "priority",
+            "clearance",
+            "min_thickness",
+            "thermal_gap",
+            "thermal_bridge_width",
+            "name",
+        ],
+    )
+    p.add_argument("value", help="new value (int for priority, mm for others, string for name)")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--format", choices=["json", "text"], default="text")
+    p.set_defaults(func=cmd_pcb_edit_zone_set_property)
 
     # pcb sync
     sync_parser = pcb_commands.add_parser(

@@ -552,3 +552,189 @@ def query_list(board: Board | str | Path, element: str) -> dict[str, Any]:
             })
         return {"element": "layers", "items": items}
     return {"element": element, "items": [], "reason": "unknown element"}
+
+
+# ---------------------------------------------------------------------------
+# query_zone
+# ---------------------------------------------------------------------------
+
+
+def _zone_layers_multi(block: str) -> list[str] | None:
+    """Return list of layer names if zone uses ``(layers "A" "B" ...)`` form;
+    None if single-layer ``(layer ...)``."""
+    import re as _re
+    from pcb_edit import _find_block_end
+    if not block.startswith("(zone"):
+        return None
+    body_start = len("(zone")
+    n = len(block)
+    i = body_start
+    while i < n:
+        c = block[i]
+        if c == ")":
+            return None
+        if c != "(":
+            i += 1
+            continue
+        end_idx = _find_block_end(block, i)
+        sub = block[i:end_idx]
+        if sub.startswith("(layers"):
+            return _re.findall(r'"([^"]+)"', sub)
+        i = end_idx
+    return None
+
+
+def _parse_connect_pads(block: str) -> dict[str, Any] | None:
+    """Parse ``(connect_pads [MODE] (clearance N))`` into a dict.
+
+    MODE may be ``yes`` / ``no`` / ``thru_hole_only`` / ``full`` etc., or
+    absent (KiCad default).
+    """
+    import re as _re
+    from pcb_edit import _find_block_end
+    if not block.startswith("(zone"):
+        return None
+    body_start = len("(zone")
+    n = len(block)
+    i = body_start
+    while i < n:
+        c = block[i]
+        if c == ")":
+            return None
+        if c != "(":
+            i += 1
+            continue
+        end_idx = _find_block_end(block, i)
+        sub = block[i:end_idx]
+        if sub.startswith("(connect_pads"):
+            mode_m = _re.match(r"\(connect_pads\s+([A-Za-z_][A-Za-z0-9_]*)", sub)
+            mode = mode_m.group(1) if mode_m else None
+            clr_m = _re.search(r"\(clearance\s+(-?[\d.]+)\s*\)", sub)
+            clearance = float(clr_m.group(1)) if clr_m else None
+            return {"mode": mode, "clearance": clearance}
+        i = end_idx
+    return None
+
+
+def _parse_fill(block: str) -> dict[str, Any] | None:
+    """Parse the ``(fill ...)`` subform of a zone block into a dict.
+
+    Returns a dict with keys ``enabled`` (bool|None for unspecified) plus
+    every nested ``(key value)`` subform as a string/number.
+    """
+    import re as _re
+    from pcb_edit import _find_block_end
+    if not block.startswith("(zone"):
+        return None
+    body_start = len("(zone")
+    n = len(block)
+    i = body_start
+    while i < n:
+        c = block[i]
+        if c == ")":
+            return None
+        if c != "(":
+            i += 1
+            continue
+        end_idx = _find_block_end(block, i)
+        sub = block[i:end_idx]
+        if sub.startswith("(fill"):
+            head_m = _re.match(r"\(fill\s+(yes|no)\b", sub)
+            enabled = None
+            if head_m:
+                enabled = head_m.group(1) == "yes"
+            out: dict[str, Any] = {"enabled": enabled}
+            for m in _re.finditer(r"\(([A-Za-z_][A-Za-z0-9_]*)\s+([^()\s]+)\s*\)", sub):
+                key = m.group(1)
+                raw = m.group(2)
+                if key == "fill":
+                    continue
+                # Try numeric coercion.
+                try:
+                    if "." in raw:
+                        out[key] = float(raw)
+                    else:
+                        out[key] = int(raw)
+                except ValueError:
+                    out[key] = raw
+            return out
+        i = end_idx
+    return None
+
+
+def query_zone(
+    board: Board | str | Path,
+    *,
+    uuid: str | None = None,
+    name: str | None = None,
+    net: str | None = None,
+    layer: str | None = None,
+) -> dict[str, Any]:
+    """Return a single zone's details.
+
+    Exactly one selector must be supplied: ``uuid``, ``name``, or ``net+layer``.
+    Raises ``ValueError`` for ambiguous selectors or multi-match (uuid is
+    expected to be unique; name / net+layer may collide).
+    """
+    if isinstance(board, Board):
+        # query_zone needs the raw text — refuse Board objects to keep
+        # parsing consistent with edit operations.
+        raise TypeError("query_zone requires a file path, not a Board object")
+    path = Path(board)
+    text = path.read_text(encoding="utf-8")
+
+    from pcb_edit import (
+        _locate_zone,
+        _zone_uuid,
+        _zone_name,
+        _zone_net_name,
+        _zone_layer,
+        _zone_field,
+        _zone_polygon_points,
+        _zone_area_mm2,
+    )
+
+    _open_idx, _end_idx, block = _locate_zone(
+        text, uuid=uuid, name=name, net=net, layer=layer
+    )
+
+    pts = _zone_polygon_points(block)
+    layers_multi = _zone_layers_multi(block)
+    layer_val = _zone_layer(block)
+
+    priority_raw = _zone_field(block, "priority")
+    priority = int(priority_raw) if priority_raw is not None else None
+    min_thickness_raw = _zone_field(block, "min_thickness")
+    min_thickness = float(min_thickness_raw) if min_thickness_raw is not None else None
+
+    if pts:
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        bbox = {"xmin": min(xs), "ymin": min(ys), "xmax": max(xs), "ymax": max(ys)}
+    else:
+        bbox = None
+
+    connect_pads = _parse_connect_pads(block)
+    fill = _parse_fill(block)
+    clearance = connect_pads.get("clearance") if connect_pads else None
+
+    out: dict[str, Any] = {
+        "uuid": _zone_uuid(block),
+        "name": _zone_name(block),
+        "net": _zone_net_name(block),
+        "priority": priority,
+        "connect_pads": connect_pads,
+        "clearance": clearance,
+        "min_thickness": min_thickness,
+        "fill": fill,
+        "polygon": {"points": [[x, y] for (x, y) in pts]},
+        "bbox": bbox,
+        "area_mm2": _zone_area_mm2(pts),
+        "found": True,
+    }
+    if layers_multi is not None:
+        out["layers"] = layers_multi
+        out["layer"] = layers_multi[0] if layers_multi else None
+    else:
+        out["layer"] = layer_val
+    return out
