@@ -616,12 +616,207 @@ def delete_symbol(
     }
 
 
+def _build_imported_symbol_block(
+    lib_block: str,
+    lib_id: str,
+    sym_name: str,
+) -> str:
+    """Re-indent a lib `(symbol "<sym_name>" ...)` block (depth 1 in .kicad_sym)
+    to depth 2 (inside a schematic's `(lib_symbols ...)`), and rewrite its
+    header name to ``lib_id``.
+
+    The input ``lib_block`` text is what ``_iter_top_blocks(text, "symbol")``
+    extracts from a `.kicad_sym` file: starts with ``(symbol "<sym_name>"`` and
+    ends with the matching ``)``. The result has one extra leading tab on every
+    line and a trailing newline.
+    """
+    # rewrite header name (first occurrence only)
+    new_header = f'(symbol "{lib_id}"'
+    old_header = f'(symbol "{sym_name}"'
+    if lib_block.startswith(old_header):
+        renamed = new_header + lib_block[len(old_header):]
+    else:
+        renamed = re.sub(
+            r'\(symbol\s+"' + re.escape(sym_name) + r'"',
+            new_header,
+            lib_block,
+            count=1,
+        )
+    # add one extra leading tab on every line
+    lines = renamed.split("\n")
+    reindented = "\n".join("\t" + ln if ln else ln for ln in lines)
+    if not reindented.endswith("\n"):
+        reindented += "\n"
+    return reindented
+
+
+def _lib_attr_value(lib_block: str, attr: str, default: str) -> str:
+    m = re.search(r"\(" + re.escape(attr) + r"\s+(yes|no)\)", lib_block)
+    return m.group(1) if m else default
+
+
+def _collect_instance_properties(lib_block: str, lib_id: str, ref: str, x: float, y: float) -> list[str]:
+    """Return a list of property-block strings for an instance, indented at depth 2.
+
+    Copies only Reference/Value/Footprint/Datasheet/Description that are direct
+    children of the outer symbol. Each property's `(at ax ay arot)` is shifted
+    by (x, y).
+    """
+    # Find direct children using paren depth tracking.
+    outer_open = 0  # lib_block starts with '('
+    outer_end = len(lib_block)
+    results: list[str] = []
+    keys = _BUILTIN_PROP_KEYS
+    i = outer_open + 1
+    n = outer_end
+    in_str = False
+    depth = 1
+    while i < n:
+        c = lib_block[i]
+        if in_str:
+            if c == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if c == '"':
+                in_str = False
+            i += 1
+            continue
+        if c == '"':
+            in_str = True
+            i += 1
+            continue
+        if c == "(":
+            if depth == 1:
+                # check token name
+                j = i + 1
+                while j < n and lib_block[j].isspace():
+                    j += 1
+                k = j
+                while k < n and (lib_block[k].isalnum() or lib_block[k] == "_"):
+                    k += 1
+                tok = lib_block[j:k]
+                if tok == "property":
+                    end = _find_block_end(lib_block, i)
+                    pblock = lib_block[i:end]
+                    m_key = re.match(r'\(property\s+"([^"]+)"', pblock)
+                    if m_key and m_key.group(1) in keys:
+                        results.append((m_key.group(1), pblock))
+                    i = end
+                    continue
+            depth += 1
+            i += 1
+            continue
+        if c == ")":
+            depth -= 1
+            if depth == 0:
+                break
+            i += 1
+            continue
+        i += 1
+
+    out_blocks: list[str] = []
+    for key, pblock in results:
+        # shift (at)
+        shifted = _cascade_property_at(pblock, x, y, 0.0)
+        if key == "Reference":
+            shifted, _ = _replace_property_value_quoted(shifted, "Reference", ref)
+        # re-indent: lib property is at depth 2 already (two tabs base), but
+        # extracted block string has NO leading whitespace on first line.
+        # We want depth-2 inside the schematic symbol => 2 tabs base.
+        lines = shifted.split("\n")
+        # Detect base indent of subsequent lines from the original block context.
+        # Simplest: strip any leading tabs on each line and re-pad: 2 tabs for
+        # the first line, and increase nested lines by one tab over their
+        # original (since lib has them at 3 tabs for nested content under a
+        # 2-tab property).
+        # The original property block in the lib looks like:
+        #   (property "K" "V"
+        #     (at ...)
+        #     (effects ...)
+        #   )
+        # With tab indent it's actually:
+        #   \t\t(property "K" "V"\n\t\t\t(at ...)\n\t\t\t(effects ...)\n\t\t)
+        # When _find_block_end extracts, the first line starts at '(' with no
+        # leading tab; the rest retain their original tabs. So we just prepend
+        # 2 tabs to the first line. The continuation lines are already tabbed
+        # appropriately for depth-2 inside the schematic symbol.
+        reindented = "\t\t" + lines[0]
+        if len(lines) > 1:
+            reindented += "\n" + "\n".join(lines[1:])
+        if not reindented.endswith("\n"):
+            reindented += "\n"
+        out_blocks.append(reindented)
+    return out_blocks
+
+
+def _collect_lib_pin_numbers(lib_block: str) -> list[str]:
+    """Enumerate pin numbers from inner unit symbols of an outer lib symbol block."""
+    nums: list[str] = []
+    # lib_block starts at "(symbol ..." with paren index 0.
+    for sopen, send in _find_inner_block(lib_block, 0, len(lib_block), "symbol"):
+        for popen, pend in _find_inner_block(lib_block, sopen, send, "pin"):
+            pblock = lib_block[popen:pend]
+            m = re.search(r'\(number\s+"([^"]+)"', pblock)
+            if m:
+                nums.append(m.group(1))
+    return nums
+
+
+def _build_instance_block(
+    lib_block: str,
+    lib_id: str,
+    ref: str,
+    x: float,
+    y: float,
+    project_name: str,
+    sheet_uuid: str,
+) -> str:
+    """Build a placed-symbol instance block, tab-indented at depth 1."""
+    exclude_sim = _lib_attr_value(lib_block, "exclude_from_sim", "no")
+    in_bom = _lib_attr_value(lib_block, "in_bom", "yes")
+    on_board = _lib_attr_value(lib_block, "on_board", "yes")
+    in_pos_files = _lib_attr_value(lib_block, "in_pos_files", "yes")
+    sym_uuid = _new_uuid()
+    props = _collect_instance_properties(lib_block, lib_id, ref, x, y)
+    pin_nums = _collect_lib_pin_numbers(lib_block)
+
+    lines: list[str] = []
+    lines.append("\t(symbol")
+    lines.append(f'\t\t(lib_id "{lib_id}")')
+    lines.append(f"\t\t(at {_fmt_coord(x)} {_fmt_coord(y)} 0)")
+    lines.append("\t\t(unit 1)")
+    lines.append(f"\t\t(exclude_from_sim {exclude_sim})")
+    lines.append(f"\t\t(in_bom {in_bom})")
+    lines.append(f"\t\t(on_board {on_board})")
+    lines.append(f"\t\t(in_pos_files {in_pos_files})")
+    lines.append("\t\t(dnp no)")
+    lines.append(f'\t\t(uuid "{sym_uuid}")')
+    block = "\n".join(lines) + "\n"
+    for p in props:
+        block += p
+    for num in pin_nums:
+        block += f'\t\t(pin "{num}"\n'
+        block += f'\t\t\t(uuid "{_new_uuid()}")\n'
+        block += "\t\t)\n"
+    block += "\t\t(instances\n"
+    block += f'\t\t\t(project "{project_name}"\n'
+    block += f'\t\t\t\t(path "/{sheet_uuid}"\n'
+    block += f'\t\t\t\t\t(reference "{ref}")\n'
+    block += "\t\t\t\t\t(unit 1)\n"
+    block += "\t\t\t\t)\n"
+    block += "\t\t\t)\n"
+    block += "\t\t)\n"
+    block += "\t)\n"
+    return block
+
+
 def add_symbol(
     sch_path: str | Path,
     lib_id: str,
     ref: str,
     at: tuple[float, float],
     dry_run: bool = False,
+    lib_file: str | Path | None = None,
 ) -> dict[str, Any]:
     """Add a new symbol instance by cloning an existing same-lib_id sibling.
 
@@ -662,7 +857,19 @@ def add_symbol(
         raise ValueError(f"(lib_symbols ...) block not found in {sch_path}")
     ls_open, ls_end = libsyms
     if _find_named_symbol_block(text, ls_open, ls_end, lib_id) is None:
-        raise ValueError(f'lib_id "{lib_id}" not found in (lib_symbols ...)')
+        if lib_file is None:
+            raise ValueError(f'lib_id "{lib_id}" not found in (lib_symbols ...)')
+        return _add_symbol_via_import(
+            sch_path=sch_path,
+            text=text,
+            lib_id=lib_id,
+            ref=ref,
+            at=at,
+            lib_file=Path(lib_file),
+            ls_open=ls_open,
+            ls_end=ls_end,
+            dry_run=dry_run,
+        )
 
     # Rule 4: clone source auto-selection
     chosen, rejected = _find_clone_source(text, lib_id)
@@ -737,6 +944,110 @@ def add_symbol(
             },
             "value": src_meta["value"],
             "footprint": src_meta["footprint"],
+        },
+    }
+
+
+def _add_symbol_via_import(
+    *,
+    sch_path: Path,
+    text: str,
+    lib_id: str,
+    ref: str,
+    at: tuple[float, float],
+    lib_file: Path,
+    ls_open: int,
+    ls_end: int,
+    dry_run: bool,
+) -> dict[str, Any]:
+    """Import a symbol definition from an external .kicad_sym into the schematic's
+    (lib_symbols ...), then synthesize an instance at ``at``.
+    """
+    if not lib_file.exists():
+        raise ValueError(
+            f'lib_id "{lib_id}" not found in embedded lib_symbols and '
+            f'not found in --lib-file {lib_file}'
+        )
+    lib_text = _read(lib_file)
+    sym_name = lib_id.split(":", 1)[1] if ":" in lib_id else lib_id
+
+    found_block: str | None = None
+    for o, e in _iter_top_blocks(lib_text, "symbol"):
+        head = lib_text[o : min(o + 200, e)]
+        m = re.match(r'\(symbol\s+"([^"]+)"', head)
+        if m and m.group(1) == sym_name:
+            found_block = lib_text[o:e]
+            break
+    if found_block is None:
+        raise ValueError(
+            f'lib_id "{lib_id}" not found in embedded lib_symbols and '
+            f'not found in --lib-file {lib_file}'
+        )
+
+    imported = _build_imported_symbol_block(found_block, lib_id, sym_name)
+
+    # Insert imported block into (lib_symbols ...) — handle empty case.
+    ls_block = text[ls_open:ls_end]
+    # check whether lib_symbols has any direct children
+    has_children = False
+    for _ in _find_inner_block(text, ls_open, ls_end, "symbol"):
+        has_children = True
+        break
+
+    if has_children:
+        # insert before the closing ')' of (lib_symbols ...)
+        insert_at = ls_end - 1  # position of ')'
+        # the ')' is preceded by '\n\t' typically; just insert block before it.
+        # Ensure the preceding char is a newline; if not, add one.
+        prefix = ""
+        if insert_at > 0 and text[insert_at - 1] != "\n":
+            prefix = "\n"
+        new_text = text[:insert_at] + prefix + imported + "\t" + text[insert_at:]
+    else:
+        # one-line `(lib_symbols)` (no children). Expand to multiline.
+        insert_at = ls_end - 1  # position of ')'
+        # before insert: '\n' + imported (already ends in '\n') + '\t' then ')'
+        new_text = text[:insert_at] + "\n" + imported + "\t" + text[insert_at:]
+
+    # Determine sheet UUID (first uuid in the schematic — the top-level one)
+    m_sheet = re.search(r'\(uuid\s+"([^"]+)"\)', new_text)
+    sheet_uuid = m_sheet.group(1) if m_sheet else "00000000-0000-0000-0000-000000000000"
+    project_name = sch_path.stem
+
+    x, y = float(at[0]), float(at[1])
+    instance_block = _build_instance_block(
+        found_block, lib_id, ref, x, y, project_name, sheet_uuid
+    )
+
+    # Insert instance block before the final ')' of the top-level (kicad_sch ...).
+    # Locate the top-level open paren of kicad_sch.
+    m_top = re.search(r"\(kicad_sch\b", new_text)
+    if not m_top:
+        raise ValueError("could not locate (kicad_sch ...) top block")
+    top_open = m_top.start()
+    top_end = _find_block_end(new_text, top_open)
+    insert_at = top_end - 1  # position of final ')'
+    prefix = ""
+    if insert_at > 0 and new_text[insert_at - 1] != "\n":
+        prefix = "\n"
+    new_text2 = new_text[:insert_at] + prefix + instance_block + new_text[insert_at:]
+
+    # Extract value (best-effort) from the imported lib block.
+    m_val = re.search(r'\(property\s+"Value"\s+"([^"]*)"', found_block)
+    value = m_val.group(1) if m_val else None
+
+    changed = _maybe_write(sch_path, text, new_text2, dry_run)
+    return {
+        "action": "add_symbol",
+        "changed": changed,
+        "diff": _diff(text, new_text2, sch_path),
+        "details": {
+            "lib_id": lib_id,
+            "ref": ref,
+            "at": [x, y, 0.0],
+            "imported_from": str(lib_file),
+            "value": value,
+            "footprint": "",
         },
     }
 

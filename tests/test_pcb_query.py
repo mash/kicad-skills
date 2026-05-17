@@ -1,7 +1,13 @@
 """Success-path tests for ``kicad-tool pcb query *`` leaves."""
 from __future__ import annotations
 
+import pytest
+
 from tests.helpers import run_cli
+
+UUID_GND_F = "00000000-0000-0000-0000-00000000201e"
+UUID_GND_B = "00000000-0000-0000-0000-00000000202e"
+UUID_VCC_F = "00000000-0000-0000-0000-00000000203e"
 
 
 def test_pcb_query_list_footprints(pcb_fixture):
@@ -42,3 +48,53 @@ def test_pcb_query_region(pcb_fixture):
     out = run_cli("pcb", "query", "region", str(pcb_fixture), "0,0,200,200")
     refs = {fp["ref"] for fp in out["footprints"]}
     assert ("R1" in refs) or ("LED1" in refs)
+
+
+# --- zone query tests ------------------------------------------------------
+def test_pcb_query_zone_by_uuid(pcb_zones_fixture):
+    out = run_cli(
+        "pcb", "query", "zone", str(pcb_zones_fixture),
+        "--uuid", UUID_GND_F,
+    )
+    assert "polygon" in out
+    pts = out["polygon"]["points"]
+    assert len(pts) >= 4
+    assert out["area_mm2"] > 0
+    assert "priority" in out
+    assert "clearance" in out
+    assert "min_thickness" in out
+    assert "fill" in out
+
+
+def test_pcb_query_zone_by_name_single_match(pcb_zones_fixture):
+    out = run_cli(
+        "pcb", "query", "zone", str(pcb_zones_fixture),
+        "--name", "VCC_POUR",
+    )
+    assert out["name"] == "VCC_POUR"
+    assert out["net"] == "VCC"
+
+
+def test_pcb_query_zone_by_name_multi_match_refuses(pcb_zones_fixture):
+    with pytest.raises(RuntimeError):
+        run_cli(
+            "pcb", "query", "zone", str(pcb_zones_fixture),
+            "--name", "GND_TOP",
+        )
+
+
+def test_pcb_query_zone_by_net_and_layer(pcb_zones_fixture):
+    out = run_cli(
+        "pcb", "query", "zone", str(pcb_zones_fixture),
+        "--net", "GND", "--layer", "F.Cu",
+    )
+    assert out["net"] == "GND"
+    assert out["area_mm2"] != 0
+
+
+def test_pcb_query_zone_unknown_uuid(pcb_zones_fixture):
+    with pytest.raises(RuntimeError):
+        run_cli(
+            "pcb", "query", "zone", str(pcb_zones_fixture),
+            "--uuid", "00000000-0000-0000-0000-DOESNOTEXIST",
+        )

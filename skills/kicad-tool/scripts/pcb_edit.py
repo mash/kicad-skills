@@ -2693,6 +2693,16 @@ _ZONE_PROPERTY_KEYS = (
 )
 
 
+_ZONE_PROPERTY_COERCERS: dict[str, Any] = {
+    "priority": int,
+    "clearance": float,
+    "min_thickness": float,
+    "thermal_gap": float,
+    "thermal_bridge_width": float,
+    "name": str,
+}
+
+
 def _set_top_zone_field(block: str, key: str, formatted_value: str) -> tuple[str, str | None]:
     """Replace the value of a single top-level ``(key ...)`` subform in a zone
     block. Returns (new_block, old_value_string_or_None). Raises ValueError
@@ -2781,10 +2791,12 @@ def set_zone_property(
 
     open_idx, end_idx, block = _locate_zone(text, uuid=uuid, name=name)
 
+    coercer = _ZONE_PROPERTY_COERCERS[key]
+    new_value = coercer(value)
+
     new_block: str
     old_value: str | None
     if key == "name":
-        new_value = str(value)
         esc = new_value.replace("\\", "\\\\").replace('"', '\\"')
         new_block, old_value = _set_top_zone_field(block, "name", f'"{esc}"')
         # Strip surrounding quotes for the reported old value.
@@ -2792,36 +2804,54 @@ def set_zone_property(
             mq = re.match(r'\(name\s+"((?:[^"\\]|\\.)*)"\s*\)', old_value)
             old_value = mq.group(1) if mq else old_value
     elif key == "priority":
-        ivalue = int(value)
-        new_block, old_value = _set_top_zone_field(block, "priority", str(ivalue))
+        new_block, old_value = _set_top_zone_field(block, "priority", str(new_value))
         if old_value:
             mp = re.match(r"\(priority\s+(-?\d+)\s*\)", old_value)
             old_value = mp.group(1) if mp else old_value
     elif key == "min_thickness":
-        fvalue = float(value)
         new_block, old_value = _set_top_zone_field(
-            block, "min_thickness", _fmt_coord(fvalue)
+            block, "min_thickness", _fmt_coord(new_value)
         )
         if old_value:
             mt = re.match(r"\(min_thickness\s+(-?[\d.]+)\s*\)", old_value)
             old_value = mt.group(1) if mt else old_value
     elif key == "clearance":
-        fvalue = float(value)
         new_block, old_value = _set_nested_zone_field(
-            block, "connect_pads", "clearance", _fmt_coord(fvalue)
+            block, "connect_pads", "clearance", _fmt_coord(new_value)
         )
     elif key == "thermal_gap":
-        fvalue = float(value)
         new_block, old_value = _set_nested_zone_field(
-            block, "fill", "thermal_gap", _fmt_coord(fvalue)
+            block, "fill", "thermal_gap", _fmt_coord(new_value)
         )
     elif key == "thermal_bridge_width":
-        fvalue = float(value)
         new_block, old_value = _set_nested_zone_field(
-            block, "fill", "thermal_bridge_width", _fmt_coord(fvalue)
+            block, "fill", "thermal_bridge_width", _fmt_coord(new_value)
         )
     else:  # pragma: no cover — guarded by whitelist
         raise ValueError(f"unsupported key {key!r}")
+
+    # Coerce the extracted old value to the same type as `new_value` so that
+    # callers (and the noop check below) can compare like-with-like.
+    typed_old: Any = None
+    if old_value is not None:
+        try:
+            typed_old = coercer(old_value)
+        except (TypeError, ValueError):
+            typed_old = old_value
+
+    # Short-circuit noop: typed comparison so e.g. priority 1 == 1.
+    if typed_old == new_value:
+        return {
+            "action": "set_zone_property",
+            "changed": False,
+            "diff": "",
+            "details": {
+                "uuid": _zone_uuid(block),
+                "key": key,
+                "old": typed_old,
+                "new": new_value,
+            },
+        }
 
     new_block = _strip_filled_polygon(new_block)
     new_text = _splice_zone_block(text, open_idx, end_idx, new_block)
@@ -2834,8 +2864,8 @@ def set_zone_property(
         "details": {
             "uuid": _zone_uuid(new_block),
             "key": key,
-            "old": old_value,
-            "new": value,
+            "old": typed_old,
+            "new": new_value,
         },
     }
 

@@ -170,6 +170,75 @@ def test_sch_edit_symbol_add_pin_with_lib_file(sch_fixture: Path) -> None:
     assert lib_info["diff_summary"]
 
 
+_PINLESS_LIB = """(kicad_symbol_lib
+\t(version 20231120)
+\t(generator "kicad_symbol_editor")
+\t(symbol "Hole"
+\t\t(exclude_from_sim no)
+\t\t(in_bom no)
+\t\t(on_board yes)
+\t\t(in_pos_files no)
+\t\t(property "Reference" "H" (at 0 5.08 0))
+\t\t(property "Value" "Hole" (at 0 3.175 0))
+\t\t(property "Footprint" "" (at 0 0 0))
+\t\t(property "Datasheet" "" (at 0 0 0))
+\t\t(property "Description" "Pinless hole" (at 0 0 0))
+\t\t(symbol "Hole_0_1"
+\t\t\t(circle
+\t\t\t\t(center 0 0)
+\t\t\t\t(radius 1.27)
+\t\t\t)
+\t\t)
+\t)
+)
+"""
+
+
+def test_sch_edit_symbol_add_with_lib_file(sch_fixture: Path) -> None:
+    lib_path = sch_fixture.parent / "mech.kicad_sym"
+    lib_path.write_text(_PINLESS_LIB, encoding="utf-8")
+    out = run_cli(
+        "sch", "edit", "symbol", "add",
+        str(sch_fixture), "Mech:Hole", "H99", "50,50",
+        "--lib-file", str(lib_path),
+        "--dry-run",
+    )
+    _assert_edit_payload(out, "add_symbol")
+    assert out["details"]["lib_id"] == "Mech:Hole"
+    assert out["details"]["ref"] == "H99"
+    assert out["details"]["imported_from"] == str(lib_path)
+    # diff should mention both the lib_symbols import and a new instance.
+    diff = out["diff"]
+    assert '(symbol "Mech:Hole"' in diff
+    assert '(lib_id "Mech:Hole")' in diff
+    assert '(reference "H99")' in diff
+
+
+def test_sch_edit_symbol_add_missing_in_both(sch_fixture: Path, tmp_path: Path) -> None:
+    lib_path = sch_fixture.parent / "mech.kicad_sym"
+    lib_path.write_text(_PINLESS_LIB, encoding="utf-8")
+    with pytest.raises(RuntimeError):
+        run_cli(
+            "sch", "edit", "symbol", "add",
+            str(sch_fixture), "Mech:DoesNotExist", "H99", "50,50",
+            "--lib-file", str(lib_path),
+            "--dry-run",
+        )
+
+
+def test_sch_edit_symbol_add_existing_ignores_lib_file(sch_fixture: Path) -> None:
+    # Use minimal:R which is already embedded; provide a bogus --lib-file.
+    out = run_cli(
+        "sch", "edit", "symbol", "add",
+        str(sch_fixture), "minimal:R", "R99", "50,50",
+        "--lib-file", "/nonexistent/path/to.kicad_sym",
+        "--dry-run",
+    )
+    _assert_edit_payload(out, "add_symbol")
+    # imported_from key absent on clone path
+    assert out["details"].get("imported_from") is None
+
+
 # --------------------------------------------------------------------------
 # delete
 # --------------------------------------------------------------------------

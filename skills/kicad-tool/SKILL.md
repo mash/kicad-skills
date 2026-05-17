@@ -80,6 +80,7 @@ PCB equivalents (same shape):
 | `pcb query net <board> <NAME_OR_REF.PAD>` | Members of a net |
 | `pcb query region <board> <X1,Y1,X2,Y2>` | Footprints/drawings/tracks/vias/zones in bbox |
 | `pcb query list <board> <KIND>` | KIND ∈ footprints/tracks/vias/zones/drawings/nets |
+| `pcb query zone <board> (--uuid U \| --name N \| --net NET --layer LAYER)` | Single zone: uuid, name, net, layer, priority, settings, polygon points, bbox, `area_mm2` (shoelace outline area, mm²). Mutex selectors; `--layer` required with `--net` |
 
 ### Edit (structural mutations)
 
@@ -87,7 +88,7 @@ Positional `<schematic.kicad_sch>` / `<board.kicad_pcb>`. Text summary by defaul
 
 | Command | Purpose |
 |---|---|
-| `sch edit symbol add <sch> <LIB_ID> <REF> <X,Y>` | Add a symbol instance by cloning an existing same-`lib_id` sibling in the same sheet (must already contain at least one annotated, unmirrored, unit-1 instance). Inherits Value/Footprint/rotation/`on_board`/`in_bom` from the clone source — adjust afterwards with `set-property` / `set-attribute` if needed. |
+| `sch edit symbol add <sch> <LIB_ID> <REF> <X,Y> [--lib-file PATH]` | Add a symbol instance. If `<LIB_ID>` is already in the schematic's embedded `(lib_symbols ...)`, clones an existing same-`lib_id` sibling (must be annotated, unmirrored, unit-1) and inherits its Value/Footprint/rotation/`on_board`/`in_bom`. Otherwise, with `--lib-file <library.kicad_sym>`, imports the symbol definition into `(lib_symbols ...)` and synthesizes a fresh instance (works for pinless symbols like `Mechanical:MountingHole` and for top schematics with empty `(lib_symbols)`). Adjust Value/Footprint/attributes afterwards with `set-property` / `set-attribute`. |
 | `sch edit symbol move <sch> <REF> <X,Y> [--rotation R]` | Move/rotate a symbol |
 | `sch edit symbol move-property <sch> <REF> <KEY> <X,Y> [--rotation R]` | Move a property field |
 | `sch edit symbol add-pin <sch> <LIB_ID> <NUMBER> <NAME> <X,Y> --length L --type T [--rotation R] [--shape S] [--lib-file PATH]` | Add a pin (updates embedded lib_symbols + `.kicad_sym`) |
@@ -105,6 +106,10 @@ Positional `<schematic.kicad_sch>` / `<board.kicad_pcb>`. Text summary by defaul
 | `pcb edit footprint move-property <board> <REF> <KEY> <X,Y> [--rotation R]` | Move a property field |
 | `pcb edit footprint set-property <board> <REF> <KEY> <VALUE>` | Set a property (refuses `Reference` — use schematic + `pcb sync`) |
 | `pcb edit footprint move-layer <board> <REF> front\|back [--at X,Y] [--rotation R]` | Flip to F.Cu / B.Cu (mirrors geometry, preserves property positions) |
+| `pcb edit zone set-polygon <board> (--uuid U \| --name N \| --net NET --layer LAYER) <X1,Y1> <X2,Y2> <X3,Y3> [...]` | Replace a zone's outline polygon (≥3 points). Strips stale `(filled_polygon ...)` (KiCad refills). Rejects degenerate polygons (zero area, consecutive duplicate points) |
+| `pcb edit zone add <board> <NET> <LAYER> <X1,Y1> <X2,Y2> <X3,Y3> [...] --copy-settings-from-uuid U` | Add a new zone, inheriting settings (hatch/connect_pads/clearance/min_thickness/fill/thermal) from an existing zone. Net and layer must already exist. `--name`, `--priority` optional overrides. Secondary path: explicit settings flags instead of `--copy-settings-from-uuid` |
+| `pcb edit zone delete <board> (--uuid U \| --name N \| --net NET --layer LAYER)` | Delete a zone block entirely. Tracks/vias/other zones untouched |
+| `pcb edit zone set-property <board> (--uuid U \| --name N) <priority\|clearance\|min_thickness\|thermal_gap\|thermal_bridge_width\|name> <VALUE>` | Edit a single zone setting (KEY whitelisted). Strips `(filled_polygon ...)` after mutation |
 
 Locked footprints are refused. Only the targeted block is rewritten; UUIDs and surrounding formatting are preserved.
 
