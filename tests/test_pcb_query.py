@@ -98,3 +98,68 @@ def test_pcb_query_zone_unknown_uuid(pcb_zones_fixture):
             "pcb", "query", "zone", str(pcb_zones_fixture),
             "--uuid", "00000000-0000-0000-0000-DOESNOTEXIST",
         )
+
+
+# --- via query tests -------------------------------------------------------
+UUID_VIA_GND = "00000000-0000-0000-0000-0000000030a1"
+UUID_VIA_VCC = "00000000-0000-0000-0000-0000000030a2"
+
+
+def test_pcb_query_list_vias_new_fields(pcb_vias_fixture):
+    out = run_cli("pcb", "query", "list", str(pcb_vias_fixture), "vias")
+    assert out["element"] == "vias"
+    uuids = {item["uuid"] for item in out["items"]}
+    assert UUID_VIA_GND in uuids
+    assert UUID_VIA_VCC in uuids
+    by_uuid = {it["uuid"]: it for it in out["items"]}
+    assert by_uuid[UUID_VIA_GND]["free"] is False
+    assert by_uuid[UUID_VIA_GND]["locked"] is False
+    assert by_uuid[UUID_VIA_VCC]["free"] is True
+
+
+def test_pcb_query_via_by_uuid(pcb_vias_fixture):
+    out = run_cli(
+        "pcb", "query", "via", str(pcb_vias_fixture),
+        "--uuid", UUID_VIA_GND,
+    )
+    assert out["found"] is True
+    assert out["uuid"] == UUID_VIA_GND
+    assert out["at"]["x"] == 100.0
+    assert out["at"]["y"] == 100.0
+    assert out["net"] == "GND"
+    assert out["size"] == 0.8
+    assert out["drill"] == 0.4
+    assert out["layers"] == ["F.Cu", "B.Cu"]
+    assert out["free"] is False
+
+
+def test_pcb_query_via_by_at_hit(pcb_vias_fixture):
+    out = run_cli(
+        "pcb", "query", "via", str(pcb_vias_fixture),
+        "--at", "100.0,100.0",
+    )
+    assert out["found"] is True
+    assert out["uuid"] == UUID_VIA_GND
+
+
+def test_pcb_query_via_by_at_miss(pcb_vias_fixture):
+    out = run_cli(
+        "pcb", "query", "via", str(pcb_vias_fixture),
+        "--at", "0,0",
+        check=False,
+    )
+    assert out["found"] is False
+    assert "no via within" in out["reason"]
+
+
+def test_pcb_query_via_by_at_ambiguous(pcb_vias_fixture):
+    # Place point midway between the two vias (at 100,100 and 110,100) and
+    # widen tolerance so both fall inside.
+    out = run_cli(
+        "pcb", "query", "via", str(pcb_vias_fixture),
+        "--at", "105,100", "--tolerance", "10",
+        check=False,
+    )
+    assert out["found"] is False
+    assert out["reason"] == "ambiguous"
+    assert len(out["candidates"]) == 2

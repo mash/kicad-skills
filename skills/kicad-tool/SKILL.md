@@ -81,6 +81,7 @@ PCB equivalents (same shape):
 | `pcb query region <board> <X1,Y1,X2,Y2>` | Footprints/drawings/tracks/vias/zones in bbox |
 | `pcb query list <board> <KIND>` | KIND ∈ footprints/tracks/vias/zones/drawings/nets |
 | `pcb query zone <board> (--uuid U \| --name N \| --net NET --layer LAYER)` | Single zone: uuid, name, net, layer, priority, settings, polygon points, bbox, `area_mm2` (shoelace outline area, mm²). Mutex selectors; `--layer` required with `--net` |
+| `pcb query via <board> (--uuid U \| --at X,Y [--tolerance MM])` | Single via: uuid, at, size, drill, layers, net, free, locked. `--at` returns the unique via within tolerance (default 0.05 mm); multiple matches return `ambiguous` with `candidates` |
 
 ### Edit (structural mutations)
 
@@ -110,6 +111,10 @@ Positional `<schematic.kicad_sch>` / `<board.kicad_pcb>`. Text summary by defaul
 | `pcb edit zone add <board> <NET> <LAYER> <X1,Y1> <X2,Y2> <X3,Y3> [...] --copy-settings-from-uuid U` | Add a new zone, inheriting settings (hatch/connect_pads/clearance/min_thickness/fill/thermal) from an existing zone. Net and layer must already exist. `--name`, `--priority` optional overrides. Secondary path: explicit settings flags instead of `--copy-settings-from-uuid` |
 | `pcb edit zone delete <board> (--uuid U \| --name N \| --net NET --layer LAYER)` | Delete a zone block entirely. Tracks/vias/other zones untouched |
 | `pcb edit zone set-property <board> (--uuid U \| --name N) <priority\|clearance\|min_thickness\|thermal_gap\|thermal_bridge_width\|name> <VALUE>` | Edit a single zone setting (KEY whitelisted). Strips `(filled_polygon ...)` after mutation |
+| `pcb edit via add <board> <NET> <X,Y> [--size MM] [--drill MM] [--layers F.Cu,B.Cu] [--free]` | Add a new via. Net must exist. Defaults size/drill from board `(setup)` (`via_size`/`via_drill`), else 0.8/0.4. UUID is deterministic from (net,xy,layers) — re-adding the same triple is idempotent |
+| `pcb edit via delete <board> (--uuid U \| --at X,Y [--tolerance MM])` | Delete a single via by uuid or nearest position. Multiple candidates within tolerance → error |
+| `pcb edit via move <board> (--uuid U \| --at X,Y [--tolerance MM]) <NEW_X,NEW_Y>` | Move a via. Only `(at ...)` is rewritten; size/drill/net/layers/uuid unchanged |
+| `pcb edit via set-property <board> (--uuid U \| --at X,Y [--tolerance MM]) <size\|drill\|net\|layers\|free\|locked> <VALUE>` | Set a single via field (KEY whitelisted). `layers` is comma-separated; `free`/`locked` accept yes/no/true/false/0/1; `net` is name-validated |
 
 Locked footprints are refused. Only the targeted block is rewritten; UUIDs and surrounding formatting are preserved.
 

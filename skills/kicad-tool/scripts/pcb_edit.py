@@ -2870,6 +2870,521 @@ def set_zone_property(
     }
 
 
+# ---------------------------------------------------------------------------
+# Via helpers (shared by query/edit via commands)
+# ---------------------------------------------------------------------------
+
+
+def _iter_via_blocks(text: str):
+    """Yield (open_idx, end_idx, block_text) for every top-level (via ...) block."""
+    for open_idx, end_idx in _iter_top_blocks(text, "via"):
+        yield open_idx, end_idx, text[open_idx:end_idx]
+
+
+def _via_field(block: str, key: str) -> str | None:
+    """Extract a single-value top-level field from a via block (quoted or bare)."""
+    if not block.startswith("(via"):
+        return None
+    body_start = len("(via")
+    n = len(block)
+    i = body_start
+    pat_quoted = re.compile(r"\(" + re.escape(key) + r'\s+"((?:[^"\\]|\\.)*)"\s*\)')
+    pat_bare = re.compile(r"\(" + re.escape(key) + r"\s+([^()\s]+)\s*\)")
+    while i < n:
+        c = block[i]
+        if c == ")":
+            return None
+        if c != "(":
+            i += 1
+            continue
+        end_idx = _find_block_end(block, i)
+        sub = block[i:end_idx]
+        m = pat_quoted.match(sub)
+        if m:
+            s = m.group(1)
+            if "\\" in s:
+                s = s.replace("\\\\", "\x00").replace('\\"', '"').replace("\x00", "\\")
+            return s
+        m = pat_bare.match(sub)
+        if m:
+            return m.group(1)
+        i = end_idx
+    return None
+
+
+def _via_at(block: str) -> tuple[float, float] | None:
+    if not block.startswith("(via"):
+        return None
+    body_start = len("(via")
+    n = len(block)
+    i = body_start
+    while i < n:
+        c = block[i]
+        if c == ")":
+            return None
+        if c != "(":
+            i += 1
+            continue
+        end_idx = _find_block_end(block, i)
+        sub = block[i:end_idx]
+        m = re.match(r"\(at\s+(-?[\d.]+)\s+(-?[\d.]+)\s*\)", sub)
+        if m:
+            return float(m.group(1)), float(m.group(2))
+        i = end_idx
+    return None
+
+
+def _via_layers(block: str) -> list[str]:
+    if not block.startswith("(via"):
+        return []
+    body_start = len("(via")
+    n = len(block)
+    i = body_start
+    while i < n:
+        c = block[i]
+        if c == ")":
+            return []
+        if c != "(":
+            i += 1
+            continue
+        end_idx = _find_block_end(block, i)
+        sub = block[i:end_idx]
+        if sub.startswith("(layers"):
+            return re.findall(r'"([^"]+)"', sub)
+        i = end_idx
+    return []
+
+
+def _via_size(block: str) -> float | None:
+    v = _via_field(block, "size")
+    return float(v) if v is not None else None
+
+
+def _via_drill(block: str) -> float | None:
+    v = _via_field(block, "drill")
+    return float(v) if v is not None else None
+
+
+def _via_uuid(block: str) -> str | None:
+    return _via_field(block, "uuid")
+
+
+def _via_net_name(block: str) -> str | None:
+    return _via_field(block, "net")
+
+
+def _via_free(block: str) -> bool:
+    v = _via_field(block, "free")
+    return v == "yes"
+
+
+def _via_locked(block: str) -> bool:
+    v = _via_field(block, "locked")
+    return v == "yes"
+
+
+def _locate_via(
+    text: str,
+    *,
+    uuid: str | None = None,
+    at: tuple[float, float] | None = None,
+    tolerance: float = 0.05,
+) -> tuple[int, int, str]:
+    """Locate a single (via ...) block by uuid or by nearest position.
+
+    Raises ``LookupError`` if 0 or >=2 candidates (within tolerance for --at).
+    """
+    if (uuid is None) == (at is None):
+        raise ValueError("exactly one of {uuid, at} must be specified")
+    if uuid is not None:
+        matches = [
+            (o, e, b) for o, e, b in _iter_via_blocks(text) if _via_uuid(b) == uuid
+        ]
+        if not matches:
+            raise LookupError(f"no via with uuid {uuid!r}")
+        if len(matches) > 1:
+            raise LookupError(f"ambiguous: multiple vias share uuid {uuid!r}")
+        return matches[0]
+    tx, ty = at
+    within: list[tuple[float, tuple[int, int, str]]] = []
+    for o, e, b in _iter_via_blocks(text):
+        v_at = _via_at(b)
+        if v_at is None:
+            continue
+        dx = v_at[0] - tx
+        dy = v_at[1] - ty
+        d = (dx * dx + dy * dy) ** 0.5
+        if d <= tolerance:
+            within.append((d, (o, e, b)))
+    if not within:
+        raise LookupError(
+            f"no via within {tolerance}mm of ({tx}, {ty})"
+        )
+    if len(within) >= 2:
+        raise LookupError(
+            f"ambiguous: {len(within)} vias within {tolerance}mm of ({tx}, {ty})"
+        )
+    return within[0][1]
+
+
+def _build_via_block(
+    *,
+    uuid: str,
+    at: tuple[float, float],
+    size: float,
+    drill: float,
+    layers: list[str],
+    net_name: str,
+    free: bool = False,
+    locked: bool = False,
+) -> str:
+    """Build a fresh ``(via ...)`` block body (no outer leading tab).
+
+    Caller is responsible for the depth-1 leading tab when splicing.
+    """
+    x, y = at
+    lines: list[str] = []
+    lines.append("(via")
+    lines.append(f"\t\t(at {_fmt_coord(x)} {_fmt_coord(y)})")
+    lines.append(f"\t\t(size {_fmt_coord(size)})")
+    lines.append(f"\t\t(drill {_fmt_coord(drill)})")
+    layers_tok = " ".join(f'"{ly}"' for ly in layers)
+    lines.append(f"\t\t(layers {layers_tok})")
+    if free:
+        lines.append("\t\t(free yes)")
+    if locked:
+        lines.append("\t\t(locked yes)")
+    esc = net_name.replace("\\", "\\\\").replace('"', '\\"')
+    lines.append(f'\t\t(net "{esc}")')
+    lines.append(f'\t\t(uuid "{uuid}")')
+    lines.append("\t)")
+    return "\n".join(lines)
+
+
+def _splice_via_block(text: str, open_idx: int, end_idx: int, new_block: str) -> str:
+    return text[:open_idx] + new_block + text[end_idx:]
+
+
+def _board_default_via_size_drill(text: str) -> tuple[float, float]:
+    """Read (via_size N) / (via_drill N) from the board's (setup ...) block."""
+    m = re.search(r"^\t\(setup\b", text, re.MULTILINE)
+    if not m:
+        return 0.8, 0.4
+    open_idx = m.start() + 1
+    end_idx = _find_block_end(text, open_idx)
+    setup_text = text[open_idx:end_idx]
+    sm = re.search(r"\(via_size\s+(-?[\d.]+)\s*\)", setup_text)
+    dm = re.search(r"\(via_drill\s+(-?[\d.]+)\s*\)", setup_text)
+    size = float(sm.group(1)) if sm else 0.8
+    drill = float(dm.group(1)) if dm else 0.4
+    return size, drill
+
+
+def _parse_boolish(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    s = str(value).strip().lower()
+    if s in ("yes", "true", "1"):
+        return True
+    if s in ("no", "false", "0"):
+        return False
+    raise ValueError(f"expected bool-ish (yes/no/true/false/0/1), got {value!r}")
+
+
+# ---------------------------------------------------------------------------
+# Via edit operations
+# ---------------------------------------------------------------------------
+
+
+def add_via(
+    pcb_path: str | Path,
+    net: str,
+    at: tuple[float, float],
+    *,
+    size: float | None = None,
+    drill: float | None = None,
+    layers: list[str] | None = None,
+    free: bool = False,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Add a new ``(via ...)`` block to the board.
+
+    Net must exist. Defaults size/drill from board (setup). UUID is
+    deterministic from (net, at, layers).
+    """
+    pcb_path = Path(pcb_path)
+    text = _read(pcb_path)
+
+    if _resolve_net_id(text, net) is None:
+        raise ValueError(f"unknown net {net!r}; add it to the netlist first")
+
+    if layers is None:
+        layers = ["F.Cu", "B.Cu"]
+    for ly in layers:
+        _validate_layer(text, ly)
+
+    if size is None or drill is None:
+        d_size, d_drill = _board_default_via_size_drill(text)
+        if size is None:
+            size = d_size
+        if drill is None:
+            drill = d_drill
+
+    new_uuid = _det_uuid(f"via:{net}:{at[0]}:{at[1]}:{layers}")
+
+    new_block_body = _build_via_block(
+        uuid=new_uuid,
+        at=at,
+        size=size,
+        drill=drill,
+        layers=layers,
+        net_name=net,
+        free=free,
+    )
+
+    last_via_end = _find_last_top_block_end(text, "via")
+    if last_via_end is not None:
+        insertion = "\n\t" + new_block_body
+        new_text = text[:last_via_end] + insertion + text[last_via_end:]
+    else:
+        last_seg_end = _find_last_top_block_end(text, "segment")
+        if last_seg_end is not None:
+            insertion = "\n\t" + new_block_body
+            new_text = text[:last_seg_end] + insertion + text[last_seg_end:]
+        else:
+            close_idx = _kicad_pcb_outer_close(text)
+            insertion = "\t" + new_block_body + "\n"
+            new_text = text[:close_idx] + insertion + text[close_idx:]
+
+    changed = _maybe_write(pcb_path, text, new_text, dry_run)
+    return {
+        "action": "add_via",
+        "changed": changed,
+        "diff": _diff(text, new_text, pcb_path),
+        "details": {
+            "uuid": new_uuid,
+            "net": net,
+            "at": {"x": at[0], "y": at[1]},
+            "size": size,
+            "drill": drill,
+            "layers": layers,
+            "free": free,
+        },
+    }
+
+
+def delete_via(
+    pcb_path: str | Path,
+    *,
+    uuid: str | None = None,
+    at: tuple[float, float] | None = None,
+    tolerance: float = 0.05,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    pcb_path = Path(pcb_path)
+    text = _read(pcb_path)
+    open_idx, end_idx, block = _locate_via(text, uuid=uuid, at=at, tolerance=tolerance)
+
+    via_at = _via_at(block)
+    details = {
+        "uuid": _via_uuid(block),
+        "net": _via_net_name(block),
+        "at": {"x": via_at[0], "y": via_at[1]} if via_at else None,
+        "layers": _via_layers(block),
+    }
+
+    line_start = text.rfind("\n", 0, open_idx) + 1
+    leading_ws = text[line_start:open_idx]
+    cut_start = open_idx - len(leading_ws) if leading_ws.strip() == "" else open_idx
+    cut_end = end_idx
+    if cut_end < len(text) and text[cut_end] == "\n":
+        cut_end += 1
+    new_text = text[:cut_start] + text[cut_end:]
+
+    changed = _maybe_write(pcb_path, text, new_text, dry_run)
+    return {
+        "action": "delete_via",
+        "changed": changed,
+        "diff": _diff(text, new_text, pcb_path),
+        "details": details,
+    }
+
+
+def move_via(
+    pcb_path: str | Path,
+    *,
+    uuid: str | None = None,
+    at: tuple[float, float] | None = None,
+    to: tuple[float, float],
+    tolerance: float = 0.05,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    pcb_path = Path(pcb_path)
+    text = _read(pcb_path)
+    open_idx, end_idx, block = _locate_via(text, uuid=uuid, at=at, tolerance=tolerance)
+
+    old_at = _via_at(block)
+    new_at_str = f"(at {_fmt_coord(to[0])} {_fmt_coord(to[1])})"
+    new_block, n = re.subn(
+        r"\(at\s+-?[\d.]+\s+-?[\d.]+\s*\)",
+        new_at_str,
+        block,
+        count=1,
+    )
+    if n != 1:
+        raise ValueError("via has no (at ...) field")
+    new_text = _splice_via_block(text, open_idx, end_idx, new_block)
+    changed = _maybe_write(pcb_path, text, new_text, dry_run)
+    return {
+        "action": "move_via",
+        "changed": changed,
+        "diff": _diff(text, new_text, pcb_path),
+        "details": {
+            "uuid": _via_uuid(new_block),
+            "old": {"x": old_at[0], "y": old_at[1]} if old_at else None,
+            "new": {"x": to[0], "y": to[1]},
+        },
+    }
+
+
+_VIA_PROPERTY_KEYS = ("size", "drill", "net", "layers", "free", "locked")
+
+
+def _set_top_via_field(block: str, key: str, formatted_value: str) -> tuple[str, str | None]:
+    """Replace value of a top-level (key ...) subform in a via block. Returns
+    (new_block, old_inner). If absent, inserts the subform before the
+    closing ')'."""
+    if not block.startswith("(via"):
+        raise ValueError("not a via block")
+    body_start = len("(via")
+    n = len(block)
+    i = body_start
+    while i < n:
+        c = block[i]
+        if c == ")":
+            break
+        if c != "(":
+            i += 1
+            continue
+        end_idx = _find_block_end(block, i)
+        sub = block[i:end_idx]
+        m = re.match(r"\(([A-Za-z_][A-Za-z0-9_]*)", sub)
+        if m and m.group(1) == key:
+            old = sub
+            new_sub = f"({key} {formatted_value})"
+            return block[:i] + new_sub + block[end_idx:], old
+        i = end_idx
+    # Insert before the closing ')'. The closing ')' is preceded by "\n\t",
+    # so prepending "\t(...)\n\t" turns it into "\n\t\t(...)\n\t)".
+    close_idx = block.rfind(")")
+    insertion = f"\t({key} {formatted_value})\n\t"
+    return block[:close_idx] + insertion + block[close_idx:], None
+
+
+def set_via_property(
+    pcb_path: str | Path,
+    *,
+    uuid: str | None = None,
+    at: tuple[float, float] | None = None,
+    key: str,
+    value: Any,
+    tolerance: float = 0.05,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    if key not in _VIA_PROPERTY_KEYS:
+        raise ValueError(
+            f"unsupported via property {key!r}; choose from {_VIA_PROPERTY_KEYS}"
+        )
+    pcb_path = Path(pcb_path)
+    text = _read(pcb_path)
+    open_idx, end_idx, block = _locate_via(text, uuid=uuid, at=at, tolerance=tolerance)
+
+    old_value: Any = None
+    new_value: Any
+    if key == "size":
+        new_value = float(value)
+        old_value = _via_size(block)
+        new_block, _ = _set_top_via_field(block, "size", _fmt_coord(new_value))
+    elif key == "drill":
+        new_value = float(value)
+        old_value = _via_drill(block)
+        new_block, _ = _set_top_via_field(block, "drill", _fmt_coord(new_value))
+    elif key == "net":
+        new_value = str(value)
+        if _resolve_net_id(text, new_value) is None:
+            raise ValueError(f"unknown net {new_value!r}")
+        old_value = _via_net_name(block)
+        esc = new_value.replace("\\", "\\\\").replace('"', '\\"')
+        new_block, _ = _set_top_via_field(block, "net", f'"{esc}"')
+    elif key == "layers":
+        if isinstance(value, list):
+            layer_list = [str(v) for v in value]
+        else:
+            layer_list = [v.strip() for v in str(value).split(",") if v.strip()]
+        for ly in layer_list:
+            _validate_layer(text, ly)
+        new_value = layer_list
+        old_value = _via_layers(block)
+        tok = " ".join(f'"{ly}"' for ly in layer_list)
+        new_block, _ = _set_top_via_field(block, "layers", tok)
+    elif key == "free":
+        new_value = _parse_boolish(value)
+        old_value = _via_free(block)
+        if new_value:
+            new_block, _ = _set_top_via_field(block, "free", "yes")
+        else:
+            # Remove the (free ...) subform if present.
+            new_block = re.sub(
+                r"\n[\t ]*\(free\s+\w+\s*\)",
+                "",
+                block,
+                count=1,
+            )
+    elif key == "locked":
+        new_value = _parse_boolish(value)
+        old_value = _via_locked(block)
+        if new_value:
+            new_block, _ = _set_top_via_field(block, "locked", "yes")
+        else:
+            new_block = re.sub(
+                r"\n[\t ]*\(locked\s+\w+\s*\)",
+                "",
+                block,
+                count=1,
+            )
+    else:  # pragma: no cover
+        raise ValueError(f"unsupported key {key!r}")
+
+    if old_value == new_value:
+        return {
+            "action": "set_via_property",
+            "changed": False,
+            "diff": "",
+            "details": {
+                "uuid": _via_uuid(block),
+                "key": key,
+                "old": old_value,
+                "new": new_value,
+            },
+        }
+
+    new_text = _splice_via_block(text, open_idx, end_idx, new_block)
+    changed = _maybe_write(pcb_path, text, new_text, dry_run)
+    return {
+        "action": "set_via_property",
+        "changed": changed,
+        "diff": _diff(text, new_text, pcb_path),
+        "details": {
+            "uuid": _via_uuid(new_block),
+            "key": key,
+            "old": old_value,
+            "new": new_value,
+        },
+    }
+
+
 __all__ = [
     "move_footprint",
     "move_footprint_property",
@@ -2881,4 +3396,8 @@ __all__ = [
     "add_zone",
     "delete_zone",
     "set_zone_property",
+    "add_via",
+    "delete_via",
+    "move_via",
+    "set_via_property",
 ]

@@ -64,3 +64,11 @@ def pcb_zones_fixture(tmp_path: Path) -> Path:
     for name in ("minimal_zones.kicad_pcb", "minimal_zones.kicad_pro"):
         shutil.copy(FIXTURES_DIR / name, tmp_path / name)
     return tmp_path / "minimal_zones.kicad_pcb"
+
+
+@pytest.fixture
+def pcb_vias_fixture(tmp_path: Path) -> Path:
+    """Copy minimal_vias fixtures into tmp_path and return the PCB path."""
+    for name in ("minimal_vias.kicad_pcb", "minimal_vias.kicad_pro"):
+        shutil.copy(FIXTURES_DIR / name, tmp_path / name)
+    return tmp_path / "minimal_vias.kicad_pcb"

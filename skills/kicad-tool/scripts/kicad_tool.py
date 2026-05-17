@@ -743,6 +743,84 @@ def cmd_pcb_edit_zone_delete(args: argparse.Namespace) -> int:
     return _emit_edit(args, res)
 
 
+def _via_selector_kwargs(args: argparse.Namespace) -> dict[str, Any]:
+    uuid = getattr(args, "uuid", None)
+    at = getattr(args, "at", None)
+    if (uuid is None) == (at is None):
+        raise ValueError("exactly one of --uuid or --at must be specified")
+    return {"uuid": uuid, "at": at}
+
+
+def cmd_pcb_query_via(args: argparse.Namespace) -> int:
+    kwargs = _via_selector_kwargs(args)
+    return _emit_query(
+        args,
+        pcb_query.query_via(args.board, tolerance=args.tolerance, **kwargs),
+    )
+
+
+def cmd_pcb_edit_via_add(args: argparse.Namespace) -> int:
+    layers = None
+    if args.layers is not None:
+        layers = [s.strip() for s in args.layers.split(",") if s.strip()]
+    res = pcb_edit.add_via(
+        args.board,
+        args.net,
+        args.xy,
+        size=args.size,
+        drill=args.drill,
+        layers=layers,
+        free=args.free,
+        dry_run=args.dry_run,
+    )
+    return _emit_edit(args, res)
+
+
+def cmd_pcb_edit_via_delete(args: argparse.Namespace) -> int:
+    kwargs = _via_selector_kwargs(args)
+    try:
+        res = pcb_edit.delete_via(
+            args.board,
+            tolerance=args.tolerance,
+            dry_run=args.dry_run,
+            **kwargs,
+        )
+    except LookupError as e:
+        raise ValueError(str(e)) from e
+    return _emit_edit(args, res)
+
+
+def cmd_pcb_edit_via_move(args: argparse.Namespace) -> int:
+    kwargs = _via_selector_kwargs(args)
+    try:
+        res = pcb_edit.move_via(
+            args.board,
+            to=args.xy,
+            tolerance=args.tolerance,
+            dry_run=args.dry_run,
+            **kwargs,
+        )
+    except LookupError as e:
+        raise ValueError(str(e)) from e
+    return _emit_edit(args, res)
+
+
+def cmd_pcb_edit_via_set_property(args: argparse.Namespace) -> int:
+    kwargs = _via_selector_kwargs(args)
+    try:
+        res = pcb_edit.set_via_property(
+            args.board,
+            key=args.key,
+            value=args.value,
+            tolerance=args.tolerance,
+            dry_run=args.dry_run,
+            **kwargs,
+        )
+    except LookupError as e:
+        raise ValueError(str(e)) from e
+    return _emit_edit(args, res)
+
+
 def cmd_pcb_edit_zone_set_property(args: argparse.Namespace) -> int:
     uuid = getattr(args, "uuid", None)
     name = getattr(args, "name", None)
@@ -1823,6 +1901,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--format", choices=["json", "text"], default="text")
     p.set_defaults(func=cmd_pcb_query_zone)
 
+    p = pcb_qsub.add_parser(
+        "via",
+        help="query a single via by uuid or position",
+    )
+    p.add_argument("board", type=Path)
+    p.add_argument("--uuid", default=None, help="via uuid")
+    p.add_argument("--at", type=parse_xy, default=None, help="via position X,Y")
+    p.add_argument("--tolerance", type=float, default=0.05,
+                   help="position match tolerance (mm) for --at (default 0.05)")
+    p.add_argument("--format", choices=["json", "text"], default="text")
+    p.set_defaults(func=cmd_pcb_query_via)
+
     # PCB edit subtree
     pcb_edit_parser = pcb_commands.add_parser("edit", help="PCB structural edits")
     pcb_esub = pcb_edit_parser.add_subparsers(dest="pcb_edit_element", required=True)
@@ -1966,6 +2056,54 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--format", choices=["json", "text"], default="text")
     p.set_defaults(func=cmd_pcb_edit_zone_set_property)
+
+    # via edits
+    vi = pcb_esub.add_parser("via", help="edit a via")
+    vi_act = vi.add_subparsers(dest="pcb_edit_action", required=True)
+
+    p = vi_act.add_parser("add", help="add a new via")
+    p.add_argument("board", type=Path)
+    p.add_argument("net", help="net name (must exist in netlist)")
+    p.add_argument("xy", type=parse_xy, help="via position X,Y")
+    p.add_argument("--size", type=float, default=None, help="via pad diameter (mm)")
+    p.add_argument("--drill", type=float, default=None, help="via drill diameter (mm)")
+    p.add_argument("--layers", default=None,
+                   help="comma-separated layers (default F.Cu,B.Cu)")
+    p.add_argument("--free", action="store_true", help="mark via as free")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--format", choices=["json", "text"], default="text")
+    p.set_defaults(func=cmd_pcb_edit_via_add)
+
+    p = vi_act.add_parser("delete", help="delete a via by uuid or position")
+    p.add_argument("board", type=Path)
+    p.add_argument("--uuid", default=None, help="via uuid")
+    p.add_argument("--at", type=parse_xy, default=None, help="via position X,Y")
+    p.add_argument("--tolerance", type=float, default=0.05)
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--format", choices=["json", "text"], default="text")
+    p.set_defaults(func=cmd_pcb_edit_via_delete)
+
+    p = vi_act.add_parser("move", help="move a via to a new X,Y")
+    p.add_argument("board", type=Path)
+    p.add_argument("--uuid", default=None, help="via uuid (selector)")
+    p.add_argument("--at", type=parse_xy, default=None,
+                   help="current via position X,Y (selector)")
+    p.add_argument("--tolerance", type=float, default=0.05)
+    p.add_argument("xy", type=parse_xy, help="destination X,Y")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--format", choices=["json", "text"], default="text")
+    p.set_defaults(func=cmd_pcb_edit_via_move)
+
+    p = vi_act.add_parser("set-property", help="set a single via property")
+    p.add_argument("board", type=Path)
+    p.add_argument("--uuid", default=None, help="via uuid")
+    p.add_argument("--at", type=parse_xy, default=None, help="via position X,Y")
+    p.add_argument("--tolerance", type=float, default=0.05)
+    p.add_argument("key", choices=["size", "drill", "net", "layers", "free", "locked"])
+    p.add_argument("value", help="new value")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--format", choices=["json", "text"], default="text")
+    p.set_defaults(func=cmd_pcb_edit_via_set_property)
 
     # pcb sync
     sync_parser = pcb_commands.add_parser(

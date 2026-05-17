@@ -333,3 +333,202 @@ def test_pcb_edit_zone_set_property_strips_filled_polygon(pcb_zones_fixture):
         if ln.startswith("+") and not ln.startswith("+++")
     ]
     assert not any("filled_polygon" in ln for ln in added_lines)
+
+
+# --- via edit tests --------------------------------------------------------
+UUID_VIA_GND = "00000000-0000-0000-0000-0000000030a1"
+UUID_VIA_VCC = "00000000-0000-0000-0000-0000000030a2"
+
+
+def test_pcb_edit_via_add(pcb_vias_fixture):
+    out = run_cli(
+        "pcb", "edit", "via", "add",
+        str(pcb_vias_fixture),
+        "GND", "50,50",
+    )
+    assert out["action"] == "add_via"
+    assert out["changed"] is True
+    assert out["details"]["net"] == "GND"
+    assert out["details"]["at"]["x"] == 50.0
+    # Re-load and verify the via count grew.
+    listing = run_cli("pcb", "query", "list", str(pcb_vias_fixture), "vias")
+    assert len(listing["items"]) == 3
+
+
+def test_pcb_edit_via_add_unknown_net(pcb_vias_fixture):
+    with pytest.raises(RuntimeError):
+        run_cli(
+            "pcb", "edit", "via", "add",
+            str(pcb_vias_fixture),
+            "NOPE", "50,50",
+            "--dry-run",
+        )
+
+
+def test_pcb_edit_via_add_idempotent_uuid(pcb_vias_fixture):
+    a = run_cli(
+        "pcb", "edit", "via", "add",
+        str(pcb_vias_fixture),
+        "GND", "70,70",
+        "--dry-run",
+    )
+    b = run_cli(
+        "pcb", "edit", "via", "add",
+        str(pcb_vias_fixture),
+        "GND", "70,70",
+        "--dry-run",
+    )
+    assert a["details"]["uuid"] == b["details"]["uuid"]
+
+
+def test_pcb_edit_via_delete_by_uuid(pcb_vias_fixture):
+    out = run_cli(
+        "pcb", "edit", "via", "delete",
+        str(pcb_vias_fixture),
+        "--uuid", UUID_VIA_GND,
+    )
+    assert out["action"] == "delete_via"
+    assert out["changed"] is True
+    listing = run_cli("pcb", "query", "list", str(pcb_vias_fixture), "vias")
+    uuids = {it["uuid"] for it in listing["items"]}
+    assert UUID_VIA_GND not in uuids
+    assert UUID_VIA_VCC in uuids
+
+
+def test_pcb_edit_via_delete_by_at(pcb_vias_fixture):
+    out = run_cli(
+        "pcb", "edit", "via", "delete",
+        str(pcb_vias_fixture),
+        "--at", "100,100",
+        "--dry-run",
+    )
+    assert out["action"] == "delete_via"
+    assert out["details"]["uuid"] == UUID_VIA_GND
+
+
+def test_pcb_edit_via_delete_ambiguous(pcb_vias_fixture):
+    with pytest.raises(RuntimeError):
+        run_cli(
+            "pcb", "edit", "via", "delete",
+            str(pcb_vias_fixture),
+            "--at", "105,100", "--tolerance", "10",
+            "--dry-run",
+        )
+
+
+def test_pcb_edit_via_move_by_uuid(pcb_vias_fixture):
+    out = run_cli(
+        "pcb", "edit", "via", "move",
+        str(pcb_vias_fixture),
+        "--uuid", UUID_VIA_GND,
+        "55,66",
+    )
+    assert out["action"] == "move_via"
+    assert out["details"]["new"]["x"] == 55
+    assert out["details"]["new"]["y"] == 66
+    # Other fields unchanged.
+    q = run_cli(
+        "pcb", "query", "via", str(pcb_vias_fixture),
+        "--uuid", UUID_VIA_GND,
+    )
+    assert q["at"]["x"] == 55
+    assert q["at"]["y"] == 66
+    assert q["size"] == 0.8
+    assert q["drill"] == 0.4
+    assert q["net"] == "GND"
+    assert q["layers"] == ["F.Cu", "B.Cu"]
+
+
+def test_pcb_edit_via_set_property_size(pcb_vias_fixture):
+    out = run_cli(
+        "pcb", "edit", "via", "set-property",
+        str(pcb_vias_fixture),
+        "--uuid", UUID_VIA_GND,
+        "size", "1.0",
+        "--dry-run",
+    )
+    assert out["changed"] is True
+    assert out["details"]["new"] == 1.0
+
+
+def test_pcb_edit_via_set_property_drill(pcb_vias_fixture):
+    out = run_cli(
+        "pcb", "edit", "via", "set-property",
+        str(pcb_vias_fixture),
+        "--uuid", UUID_VIA_GND,
+        "drill", "0.5",
+        "--dry-run",
+    )
+    assert out["changed"] is True
+    assert out["details"]["new"] == 0.5
+
+
+def test_pcb_edit_via_set_property_net(pcb_vias_fixture):
+    out = run_cli(
+        "pcb", "edit", "via", "set-property",
+        str(pcb_vias_fixture),
+        "--uuid", UUID_VIA_GND,
+        "net", "VCC",
+        "--dry-run",
+    )
+    assert out["changed"] is True
+    assert out["details"]["new"] == "VCC"
+    assert out["details"]["old"] == "GND"
+
+
+def test_pcb_edit_via_set_property_net_unknown(pcb_vias_fixture):
+    with pytest.raises(RuntimeError):
+        run_cli(
+            "pcb", "edit", "via", "set-property",
+            str(pcb_vias_fixture),
+            "--uuid", UUID_VIA_GND,
+            "net", "NOPE",
+            "--dry-run",
+        )
+
+
+def test_pcb_edit_via_set_property_layers(pcb_vias_fixture):
+    out = run_cli(
+        "pcb", "edit", "via", "set-property",
+        str(pcb_vias_fixture),
+        "--uuid", UUID_VIA_GND,
+        "layers", "B.Cu,F.Cu",
+        "--dry-run",
+    )
+    assert out["changed"] is True
+    assert out["details"]["new"] == ["B.Cu", "F.Cu"]
+
+
+def test_pcb_edit_via_set_property_layers_unknown(pcb_vias_fixture):
+    with pytest.raises(RuntimeError):
+        run_cli(
+            "pcb", "edit", "via", "set-property",
+            str(pcb_vias_fixture),
+            "--uuid", UUID_VIA_GND,
+            "layers", "F.Cu,BOGUS",
+            "--dry-run",
+        )
+
+
+def test_pcb_edit_via_set_property_free(pcb_vias_fixture):
+    out = run_cli(
+        "pcb", "edit", "via", "set-property",
+        str(pcb_vias_fixture),
+        "--uuid", UUID_VIA_GND,
+        "free", "yes",
+        "--dry-run",
+    )
+    assert out["changed"] is True
+    assert out["details"]["new"] is True
+
+
+def test_pcb_edit_via_set_property_locked(pcb_vias_fixture):
+    out = run_cli(
+        "pcb", "edit", "via", "set-property",
+        str(pcb_vias_fixture),
+        "--uuid", UUID_VIA_GND,
+        "locked", "true",
+        "--dry-run",
+    )
+    assert out["changed"] is True
+    assert out["details"]["new"] is True

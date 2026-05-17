@@ -500,18 +500,55 @@ def query_list(board: Board | str | Path, element: str) -> dict[str, Any]:
             })
         return {"element": "tracks", "items": items}
     if element in ("via", "vias"):
+        # kiutils Via doesn't expose free/locked/uuid uniformly, so fall back
+        # to a textual scan for those fields (and uuid).
+        from pcb_edit import (
+            _iter_via_blocks,
+            _via_at,
+            _via_size,
+            _via_drill,
+            _via_layers,
+            _via_net_name,
+            _via_uuid,
+            _via_free,
+            _via_locked,
+        )
+        path = getattr(b, "filePath", None)
+        text = None
+        if path is None and isinstance(board, (str, Path)):
+            text = Path(board).read_text(encoding="utf-8")
+        elif path is not None:
+            text = Path(path).read_text(encoding="utf-8")
         items = []
-        for item in b.traceItems:
-            if type(item).__name__ != "Via":
-                continue
-            items.append({
-                "at": {"x": item.position.X, "y": item.position.Y},
-                "size": item.size,
-                "drill": item.drill,
-                "layers": list(getattr(item, "layers", []) or []),
-                "net": item.net,
-                "tstamp": item.tstamp,
-            })
+        if text is not None:
+            for _o, _e, blk in _iter_via_blocks(text):
+                a = _via_at(blk)
+                items.append({
+                    "at": {"x": a[0], "y": a[1]} if a else None,
+                    "size": _via_size(blk),
+                    "drill": _via_drill(blk),
+                    "layers": _via_layers(blk),
+                    "net": _via_net_name(blk),
+                    "uuid": _via_uuid(blk),
+                    "free": _via_free(blk),
+                    "locked": _via_locked(blk),
+                    "tstamp": None,
+                })
+        else:
+            for item in b.traceItems:
+                if type(item).__name__ != "Via":
+                    continue
+                items.append({
+                    "at": {"x": item.position.X, "y": item.position.Y},
+                    "size": item.size,
+                    "drill": item.drill,
+                    "layers": list(getattr(item, "layers", []) or []),
+                    "net": item.net,
+                    "uuid": None,
+                    "free": False,
+                    "locked": False,
+                    "tstamp": item.tstamp,
+                })
         return {"element": "vias", "items": items}
     if element in ("zone", "zones"):
         items = []
@@ -737,4 +774,86 @@ def query_zone(
         out["layer"] = layers_multi[0] if layers_multi else None
     else:
         out["layer"] = layer_val
+    return out
+
+
+# ---------------------------------------------------------------------------
+# query_via
+# ---------------------------------------------------------------------------
+
+
+def query_via(
+    board: Board | str | Path,
+    *,
+    uuid: str | None = None,
+    at: tuple[float, float] | None = None,
+    tolerance: float = 0.05,
+) -> dict[str, Any]:
+    """Return a single via's details, located by uuid or by (--at, tolerance)."""
+    if isinstance(board, Board):
+        raise TypeError("query_via requires a file path, not a Board object")
+    path = Path(board)
+    text = path.read_text(encoding="utf-8")
+
+    from pcb_edit import (
+        _iter_via_blocks,
+        _via_at,
+        _via_size,
+        _via_drill,
+        _via_layers,
+        _via_net_name,
+        _via_uuid,
+        _via_free,
+        _via_locked,
+    )
+
+    if (uuid is None) == (at is None):
+        raise ValueError("exactly one of --uuid or --at must be specified")
+
+    def _summary(blk: str) -> dict[str, Any]:
+        a = _via_at(blk)
+        return {
+            "uuid": _via_uuid(blk),
+            "at": {"x": a[0], "y": a[1]} if a else None,
+            "size": _via_size(blk),
+            "drill": _via_drill(blk),
+            "layers": _via_layers(blk),
+            "net": _via_net_name(blk),
+            "free": _via_free(blk),
+            "locked": _via_locked(blk),
+        }
+
+    if uuid is not None:
+        for _o, _e, blk in _iter_via_blocks(text):
+            if _via_uuid(blk) == uuid:
+                out = _summary(blk)
+                out["found"] = True
+                return out
+        return {"found": False, "reason": f"no via with uuid {uuid!r}"}
+
+    tx, ty = at
+    within: list[tuple[float, str]] = []
+    for _o, _e, blk in _iter_via_blocks(text):
+        v_at = _via_at(blk)
+        if v_at is None:
+            continue
+        dx = v_at[0] - tx
+        dy = v_at[1] - ty
+        d = (dx * dx + dy * dy) ** 0.5
+        if d <= tolerance:
+            within.append((d, blk))
+    if not within:
+        return {
+            "found": False,
+            "reason": f"no via within {tolerance}mm of ({tx}, {ty})",
+        }
+    if len(within) >= 2:
+        within.sort(key=lambda t: t[0])
+        return {
+            "found": False,
+            "reason": "ambiguous",
+            "candidates": [_summary(blk) for _d, blk in within],
+        }
+    out = _summary(within[0][1])
+    out["found"] = True
     return out
