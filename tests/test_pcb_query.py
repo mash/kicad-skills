@@ -152,6 +152,39 @@ def test_pcb_query_via_by_at_miss(pcb_vias_fixture):
     assert "no via within" in out["reason"]
 
 
+def test_pcb_query_via_by_uuid_not_found(pcb_vias_fixture):
+    out = run_cli(
+        "pcb", "query", "via", str(pcb_vias_fixture),
+        "--uuid", "00000000-0000-0000-0000-DOESNOTEXIST",
+        check=False,
+    )
+    assert out["found"] is False
+    assert "no via with uuid" in out["reason"]
+
+
+def test_pcb_query_list_vias_from_board_object_fallback():
+    # When query_list is called with a kiutils Board (no path), the via
+    # branch falls back to: uuid=None, free=False, locked=False.
+    import sys as _sys
+    from pathlib import Path as _Path
+    _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "skills" / "kicad-tool" / "scripts"))
+    import pcb_query as _q
+    fixture_path = _Path(__file__).resolve().parent / "fixtures" / "minimal_vias.kicad_pcb"
+    board = _q.load_board(fixture_path)
+    # Strip filePath to force the fallback path (no textual scan).
+    try:
+        board.filePath = None
+    except Exception:
+        pass
+    out = _q.query_list(board, "vias")
+    assert out["element"] == "vias"
+    assert len(out["items"]) >= 2
+    for it in out["items"]:
+        assert it["uuid"] is None
+        assert it["free"] is False
+        assert it["locked"] is False
+
+
 def test_pcb_query_via_by_at_ambiguous(pcb_vias_fixture):
     # Place point midway between the two vias (at 100,100 and 110,100) and
     # widen tolerance so both fall inside.

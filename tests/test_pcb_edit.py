@@ -532,3 +532,201 @@ def test_pcb_edit_via_set_property_locked(pcb_vias_fixture):
     )
     assert out["changed"] is True
     assert out["details"]["new"] is True
+
+
+# --- via invariants / edge cases (followup) -------------------------------
+import re as _re
+import difflib as _difflib
+
+
+def _top_block_counts(text: str) -> dict[str, int]:
+    """Count top-level KiCad blocks by head token (depth-1)."""
+    return {
+        "footprint": len(_re.findall(r"^\t\(footprint\b", text, _re.MULTILINE)),
+        "zone": len(_re.findall(r"^\t\(zone\b", text, _re.MULTILINE)),
+        "segment": len(_re.findall(r"^\t\(segment\b", text, _re.MULTILINE)),
+        "net": len(_re.findall(r"^\t\(net\s+\d+\b", text, _re.MULTILINE)),
+        "via": len(_re.findall(r"^\t\(via\b", text, _re.MULTILINE)),
+    }
+
+
+def test_pcb_edit_via_add_preserves_other_block_counts(pcb_vias_fixture):
+    before = pcb_vias_fixture.read_text(encoding="utf-8")
+    bc = _top_block_counts(before)
+    run_cli(
+        "pcb", "edit", "via", "add",
+        str(pcb_vias_fixture), "GND", "60,60",
+    )
+    after = pcb_vias_fixture.read_text(encoding="utf-8")
+    ac = _top_block_counts(after)
+    assert ac["via"] == bc["via"] + 1
+    for k in ("footprint", "zone", "segment", "net"):
+        assert ac[k] == bc[k]
+
+
+def test_pcb_edit_via_delete_preserves_other_block_counts(pcb_vias_fixture):
+    before = pcb_vias_fixture.read_text(encoding="utf-8")
+    bc = _top_block_counts(before)
+    run_cli(
+        "pcb", "edit", "via", "delete",
+        str(pcb_vias_fixture), "--uuid", UUID_VIA_GND,
+    )
+    after = pcb_vias_fixture.read_text(encoding="utf-8")
+    ac = _top_block_counts(after)
+    assert ac["via"] == bc["via"] - 1
+    for k in ("footprint", "zone", "segment", "net"):
+        assert ac[k] == bc[k]
+
+
+def test_pcb_edit_via_move_preserves_other_block_counts(pcb_vias_fixture):
+    before = pcb_vias_fixture.read_text(encoding="utf-8")
+    bc = _top_block_counts(before)
+    run_cli(
+        "pcb", "edit", "via", "move",
+        str(pcb_vias_fixture), "--uuid", UUID_VIA_GND, "77,88",
+    )
+    after = pcb_vias_fixture.read_text(encoding="utf-8")
+    ac = _top_block_counts(after)
+    assert ac == bc
+
+
+def test_pcb_edit_via_set_property_preserves_other_block_counts(pcb_vias_fixture):
+    before = pcb_vias_fixture.read_text(encoding="utf-8")
+    bc = _top_block_counts(before)
+    run_cli(
+        "pcb", "edit", "via", "set-property",
+        str(pcb_vias_fixture), "--uuid", UUID_VIA_GND, "size", "1.2",
+    )
+    after = pcb_vias_fixture.read_text(encoding="utf-8")
+    ac = _top_block_counts(after)
+    assert ac == bc
+
+
+def test_pcb_edit_via_move_byte_diff_is_at_line_only(pcb_vias_fixture):
+    before = pcb_vias_fixture.read_text(encoding="utf-8").splitlines()
+    run_cli(
+        "pcb", "edit", "via", "move",
+        str(pcb_vias_fixture), "--uuid", UUID_VIA_GND, "77,88",
+    )
+    after = pcb_vias_fixture.read_text(encoding="utf-8").splitlines()
+    diff = list(_difflib.unified_diff(before, after, lineterm=""))
+    plus = [ln for ln in diff if ln.startswith("+") and not ln.startswith("+++")]
+    minus = [ln for ln in diff if ln.startswith("-") and not ln.startswith("---")]
+    assert len(plus) == 1
+    assert len(minus) == 1
+    assert "(at " in plus[0]
+    assert "(at " in minus[0]
+
+
+def test_pcb_edit_via_dry_run_add(pcb_vias_fixture):
+    before = pcb_vias_fixture.read_text(encoding="utf-8")
+    out = run_cli(
+        "pcb", "edit", "via", "add",
+        str(pcb_vias_fixture), "GND", "60,60", "--dry-run",
+    )
+    assert out["diff"]
+    # On-disk content must be unchanged in dry-run.
+    assert pcb_vias_fixture.read_text(encoding="utf-8") == before
+
+
+def test_pcb_edit_via_dry_run_delete(pcb_vias_fixture):
+    before = pcb_vias_fixture.read_text(encoding="utf-8")
+    out = run_cli(
+        "pcb", "edit", "via", "delete",
+        str(pcb_vias_fixture), "--uuid", UUID_VIA_GND, "--dry-run",
+    )
+    assert out["diff"]
+    assert pcb_vias_fixture.read_text(encoding="utf-8") == before
+
+
+def test_pcb_edit_via_dry_run_move(pcb_vias_fixture):
+    before = pcb_vias_fixture.read_text(encoding="utf-8")
+    out = run_cli(
+        "pcb", "edit", "via", "move",
+        str(pcb_vias_fixture), "--uuid", UUID_VIA_GND, "77,88", "--dry-run",
+    )
+    assert out["diff"]
+    assert pcb_vias_fixture.read_text(encoding="utf-8") == before
+
+
+def test_pcb_edit_via_dry_run_set_property(pcb_vias_fixture):
+    before = pcb_vias_fixture.read_text(encoding="utf-8")
+    out = run_cli(
+        "pcb", "edit", "via", "set-property",
+        str(pcb_vias_fixture), "--uuid", UUID_VIA_GND, "size", "1.0", "--dry-run",
+    )
+    assert out["diff"]
+    assert pcb_vias_fixture.read_text(encoding="utf-8") == before
+
+
+def test_pcb_edit_via_set_property_free_toggle_off(pcb_vias_fixture):
+    # The VCC via in the fixture has (free yes); toggling to no should
+    # remove the (free ...) subform entirely.
+    out = run_cli(
+        "pcb", "edit", "via", "set-property",
+        str(pcb_vias_fixture), "--uuid", UUID_VIA_VCC, "free", "no",
+    )
+    assert out["changed"] is True
+    assert out["details"]["new"] is False
+    text = pcb_vias_fixture.read_text(encoding="utf-8")
+    # Locate the VCC via block and ensure (free ...) is absent.
+    m = _re.search(
+        r"\(via\b[^()]*(?:\([^()]*\)[^()]*)*\(uuid \"" + UUID_VIA_VCC + r"\"",
+        text, _re.DOTALL,
+    )
+    assert m is not None
+    assert not _re.search(r"\(free\s+\w+\s*\)", m.group(0))
+
+
+def test_pcb_edit_via_cli_uuid_and_at_mutex(pcb_vias_fixture):
+    with pytest.raises(RuntimeError):
+        run_cli(
+            "pcb", "edit", "via", "set-property",
+            str(pcb_vias_fixture),
+            "--uuid", UUID_VIA_GND, "--at", "100,100",
+            "size", "1.0", "--dry-run",
+        )
+
+
+def test_pcb_edit_via_add_defaults_size_drill_from_setup(pcb_vias_fixture):
+    out = run_cli(
+        "pcb", "edit", "via", "add",
+        str(pcb_vias_fixture), "GND", "60,60", "--dry-run",
+    )
+    assert out["details"]["size"] == 0.8
+    assert out["details"]["drill"] == 0.4
+
+
+def test_pcb_edit_via_add_layers_order_uuid_invariant(pcb_vias_fixture):
+    # Sorted-layers UUID seed: adding the same (net, xy) twice with reversed
+    # layer order must collide on UUID; second add is a no-op.
+    a = run_cli(
+        "pcb", "edit", "via", "add",
+        str(pcb_vias_fixture), "GND", "60,60",
+        "--layers", "B.Cu,F.Cu",
+    )
+    b = run_cli(
+        "pcb", "edit", "via", "add",
+        str(pcb_vias_fixture), "GND", "60,60",
+        "--layers", "F.Cu,B.Cu",
+        "--dry-run",
+    )
+    assert a["details"]["uuid"] == b["details"]["uuid"]
+
+
+def test_pcb_edit_via_add_rejects_single_layer(pcb_vias_fixture):
+    with pytest.raises(RuntimeError):
+        run_cli(
+            "pcb", "edit", "via", "add",
+            str(pcb_vias_fixture), "GND", "60,60",
+            "--layers", "F.Cu", "--dry-run",
+        )
+
+
+def test_pcb_edit_via_set_property_layers_rejects_single(pcb_vias_fixture):
+    with pytest.raises(RuntimeError):
+        run_cli(
+            "pcb", "edit", "via", "set-property",
+            str(pcb_vias_fixture), "--uuid", UUID_VIA_GND,
+            "layers", "F.Cu", "--dry-run",
+        )
