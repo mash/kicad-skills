@@ -583,10 +583,150 @@ PRO_TEMPLATE = """{
 """
 
 
+ZONES_PRO_TEMPLATE = """{
+  "meta": {
+    "filename": "minimal_zones.kicad_pro",
+    "version": 1
+  }
+}
+"""
+
+
+PCB_ZONES_TEMPLATE = """(kicad_pcb
+\t(version 20260206)
+\t(generator "pcbnew")
+\t(generator_version "10.0")
+\t(general
+\t\t(thickness 1.6)
+\t\t(legacy_teardrops no)
+\t)
+\t(paper "A4")
+\t(layers
+\t\t(0 "F.Cu" signal)
+\t\t(2 "B.Cu" signal)
+\t\t(9 "F.Adhes" user "F.Adhesive")
+\t\t(11 "B.Adhes" user "B.Adhesive")
+\t\t(13 "F.Paste" user)
+\t\t(15 "B.Paste" user)
+\t\t(5 "F.SilkS" user "F.Silkscreen")
+\t\t(7 "B.SilkS" user "B.Silkscreen")
+\t\t(1 "F.Mask" user)
+\t\t(3 "B.Mask" user)
+\t\t(17 "Dwgs.User" user "User.Drawings")
+\t\t(19 "Cmts.User" user "User.Comments")
+\t\t(21 "Eco1.User" user "User.Eco1")
+\t\t(23 "Eco2.User" user "User.Eco2")
+\t\t(25 "Edge.Cuts" user)
+\t\t(27 "Margin" user)
+\t\t(31 "F.CrtYd" user "F.Courtyard")
+\t\t(29 "B.CrtYd" user "B.Courtyard")
+\t\t(35 "F.Fab" user)
+\t\t(33 "B.Fab" user)
+\t)
+\t(setup
+\t\t(pad_to_mask_clearance 0)
+\t)
+\t(net 0 "")
+\t(net 1 "GND")
+\t(net 2 "VCC")
+\t(zone
+\t\t(net 1)
+\t\t(net_name "GND")
+\t\t(layer "F.Cu")
+\t\t(uuid "00000000-0000-0000-0000-00000000201e")
+\t\t(name "GND_TOP")
+\t\t(hatch edge 0.5)
+\t\t(priority 1)
+\t\t(connect_pads yes
+\t\t\t(clearance 0.5)
+\t\t)
+\t\t(min_thickness 0.25)
+\t\t(fill yes
+\t\t\t(thermal_gap 0.5)
+\t\t\t(thermal_bridge_width 0.5)
+\t\t\t(island_removal_mode 0)
+\t\t)
+\t\t(polygon
+\t\t\t(pts
+\t\t\t\t(xy 90.0 90.0) (xy 120.0 90.0) (xy 120.0 110.0) (xy 90.0 110.0)
+\t\t\t)
+\t\t)
+\t\t(filled_polygon
+\t\t\t(layer "F.Cu")
+\t\t\t(pts
+\t\t\t\t(xy 90.1 90.1) (xy 119.9 90.1) (xy 119.9 109.9) (xy 90.1 109.9)
+\t\t\t)
+\t\t)
+\t)
+\t(zone
+\t\t(net 1)
+\t\t(net_name "GND")
+\t\t(layer "B.Cu")
+\t\t(uuid "00000000-0000-0000-0000-00000000202e")
+\t\t(name "GND_TOP")
+\t\t(hatch edge 0.5)
+\t\t(priority 1)
+\t\t(connect_pads yes
+\t\t\t(clearance 0.5)
+\t\t)
+\t\t(min_thickness 0.25)
+\t\t(fill yes
+\t\t\t(thermal_gap 0.5)
+\t\t\t(thermal_bridge_width 0.5)
+\t\t\t(island_removal_mode 0)
+\t\t)
+\t\t(polygon
+\t\t\t(pts
+\t\t\t\t(xy 90.0 90.0) (xy 120.0 90.0) (xy 120.0 110.0) (xy 90.0 110.0)
+\t\t\t)
+\t\t)
+\t\t(filled_polygon
+\t\t\t(layer "B.Cu")
+\t\t\t(pts
+\t\t\t\t(xy 90.1 90.1) (xy 119.9 90.1) (xy 119.9 109.9) (xy 90.1 109.9)
+\t\t\t)
+\t\t)
+\t)
+\t(zone
+\t\t(net 2)
+\t\t(net_name "VCC")
+\t\t(layer "F.Cu")
+\t\t(uuid "00000000-0000-0000-0000-00000000203e")
+\t\t(name "VCC_POUR")
+\t\t(hatch edge 0.4)
+\t\t(priority 10)
+\t\t(connect_pads yes
+\t\t\t(clearance 0.4)
+\t\t)
+\t\t(min_thickness 0.2)
+\t\t(fill yes
+\t\t\t(thermal_gap 0.4)
+\t\t\t(thermal_bridge_width 0.4)
+\t\t\t(island_removal_mode 0)
+\t\t)
+\t\t(polygon
+\t\t\t(pts
+\t\t\t\t(xy 95.0 95.0) (xy 105.0 95.0) (xy 105.0 105.0) (xy 95.0 105.0)
+\t\t\t)
+\t\t)
+\t\t(filled_polygon
+\t\t\t(layer "F.Cu")
+\t\t\t(pts
+\t\t\t\t(xy 95.1 95.1) (xy 104.9 95.1) (xy 104.9 104.9) (xy 95.1 104.9)
+\t\t\t)
+\t\t)
+\t)
+\t(embedded_fonts no)
+)
+"""
+
+
 def main() -> None:
     (FIXTURES_DIR / "minimal.kicad_sch").write_text(SCH_TEMPLATE)
     (FIXTURES_DIR / "minimal.kicad_pcb").write_text(PCB_TEMPLATE)
     (FIXTURES_DIR / "minimal.kicad_pro").write_text(PRO_TEMPLATE)
+    (FIXTURES_DIR / "minimal_zones.kicad_pcb").write_text(PCB_ZONES_TEMPLATE)
+    (FIXTURES_DIR / "minimal_zones.kicad_pro").write_text(ZONES_PRO_TEMPLATE)
     print(f"wrote fixtures to {FIXTURES_DIR}")
 
 

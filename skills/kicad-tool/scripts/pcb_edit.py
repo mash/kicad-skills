@@ -1944,6 +1944,362 @@ def delete_footprint(
     }
 
 
+# ---------------------------------------------------------------------------
+# Zone helpers (shared by query/edit zone commands)
+# ---------------------------------------------------------------------------
+
+
+def _iter_zone_blocks(text: str):
+    """Yield (open_idx, end_idx, block_text) for every top-level (zone ...)
+    block.
+    """
+    for open_idx, end_idx in _iter_top_blocks(text, "zone"):
+        yield open_idx, end_idx, text[open_idx:end_idx]
+
+
+def _zone_field(block: str, key: str) -> str | None:
+    """Extract a single-value field from a zone block.
+
+    Handles both quoted ``(key "value")`` and bare ``(key value)`` forms.
+    Returns the raw (unquoted) string value, or None if absent.
+
+    Only matches subforms at the top level of the zone block (depth 1
+    relative to the zone), so nested keys inside e.g. ``(fill ...)`` are
+    not accidentally picked up.
+    """
+    if not block.startswith("(zone"):
+        return None
+    # Body starts right after "(zone".
+    body_start = len("(zone")
+    n = len(block)
+    i = body_start
+    pat_quoted = re.compile(r"\(" + re.escape(key) + r'\s+"((?:[^"\\]|\\.)*)"\s*\)')
+    pat_bare = re.compile(r"\(" + re.escape(key) + r"\s+([^()\s]+)\s*\)")
+    while i < n:
+        c = block[i]
+        if c == ")":
+            return None
+        if c != "(":
+            i += 1
+            continue
+        end_idx = _find_block_end(block, i)
+        sub = block[i:end_idx]
+        m = pat_quoted.match(sub)
+        if m:
+            # Un-escape backslash-escaped chars. KiCad only escapes \" and \\;
+            # use a NUL sentinel so \\ is not re-processed.
+            s = m.group(1)
+            if "\\" in s:
+                s = s.replace("\\\\", "\x00").replace('\\"', '"').replace("\x00", "\\")
+            return s
+        m = pat_bare.match(sub)
+        if m:
+            return m.group(1)
+        i = end_idx
+    return None
+
+
+def _zone_layer(block: str) -> str | None:
+    """Return the zone's layer. Handles both ``(layer "F.Cu")`` and
+    ``(layers "F.Cu" "B.Cu" ...)`` forms; returns the first layer string.
+    """
+    val = _zone_field(block, "layer")
+    if val is not None:
+        return val
+    # Multi-layer form: (layers "F.Cu" "B.Cu" ...).
+    if not block.startswith("(zone"):
+        return None
+    body_start = len("(zone")
+    n = len(block)
+    i = body_start
+    while i < n:
+        c = block[i]
+        if c == ")":
+            return None
+        if c != "(":
+            i += 1
+            continue
+        end_idx = _find_block_end(block, i)
+        sub = block[i:end_idx]
+        m = re.match(r'\(layers\s+"([^"]+)"', sub)
+        if m:
+            return m.group(1)
+        i = end_idx
+    return None
+
+
+def _zone_net_name(block: str) -> str | None:
+    """Return the zone's net name (string), not net id."""
+    return _zone_field(block, "net_name")
+
+
+def _zone_uuid(block: str) -> str | None:
+    return _zone_field(block, "uuid")
+
+
+def _zone_name(block: str) -> str | None:
+    return _zone_field(block, "name")
+
+
+def _zone_polygon_points(block: str) -> list[tuple[float, float]]:
+    """Extract outline polygon points from ``(polygon (pts (xy X Y) ...))``.
+
+    Returns the points of the FIRST top-level ``(polygon ...)`` subform
+    inside the zone block. Returns [] if none.
+    """
+    if not block.startswith("(zone"):
+        return []
+    body_start = len("(zone")
+    n = len(block)
+    i = body_start
+    poly_text: str | None = None
+    while i < n:
+        c = block[i]
+        if c == ")":
+            break
+        if c != "(":
+            i += 1
+            continue
+        end_idx = _find_block_end(block, i)
+        sub = block[i:end_idx]
+        if sub.startswith("(polygon"):
+            poly_text = sub
+            break
+        i = end_idx
+    if poly_text is None:
+        return []
+    pts: list[tuple[float, float]] = []
+    for m in re.finditer(r"\(xy\s+(-?[\d.]+)\s+(-?[\d.]+)\s*\)", poly_text):
+        pts.append((float(m.group(1)), float(m.group(2))))
+    return pts
+
+
+def _locate_zone(
+    text: str,
+    *,
+    uuid: str | None = None,
+    name: str | None = None,
+    net: str | None = None,
+    layer: str | None = None,
+) -> tuple[int, int, str]:
+    """Locate a single (zone ...) block matching the selector.
+
+    Exactly one of {uuid}, {name}, {net+layer} must be provided.
+    Raises ValueError if no match. Raises ValueError with a clear message if
+    multiple zones match (only possible for name / net+layer; uuid is unique).
+    """
+    modes = [
+        ("uuid", uuid is not None),
+        ("name", name is not None),
+        ("net+layer", net is not None or layer is not None),
+    ]
+    active = [m for m, on in modes if on]
+    if len(active) != 1:
+        raise ValueError(
+            "exactly one of {uuid}, {name}, {net+layer} must be specified"
+        )
+    if net is not None and layer is None:
+        raise ValueError("--net requires --layer")
+    if layer is not None and net is None:
+        raise ValueError("--layer requires --net")
+
+    matches: list[tuple[int, int, str]] = []
+    for open_idx, end_idx, block in _iter_zone_blocks(text):
+        if uuid is not None:
+            if _zone_uuid(block) == uuid:
+                matches.append((open_idx, end_idx, block))
+        elif name is not None:
+            if _zone_name(block) == name:
+                matches.append((open_idx, end_idx, block))
+        else:
+            if _zone_net_name(block) == net and _zone_layer(block) == layer:
+                matches.append((open_idx, end_idx, block))
+
+    if not matches:
+        if uuid is not None:
+            raise ValueError(f"no zone with uuid {uuid!r}")
+        if name is not None:
+            raise ValueError(f"no zone with name {name!r}")
+        raise ValueError(f"no zone with net {net!r} on layer {layer!r}")
+
+    if len(matches) > 1:
+        if name is not None:
+            raise ValueError(
+                f"multiple zones match name {name!r} ({len(matches)} found); "
+                f"use --uuid to disambiguate"
+            )
+        raise ValueError(
+            f"multiple zones match net {net!r} on layer {layer!r} "
+            f"({len(matches)} found); use --uuid to disambiguate"
+        )
+    return matches[0]
+
+
+def _zone_area_mm2(points: list[tuple[float, float]]) -> float:
+    """Shoelace formula. Returns absolute value of the signed polygon area
+    in mm^2. KiCad PCB coords are in mm.
+    """
+    n = len(points)
+    if n < 3:
+        return 0.0
+    s = 0.0
+    for i in range(n):
+        x1, y1 = points[i]
+        x2, y2 = points[(i + 1) % n]
+        s += x1 * y2 - x2 * y1
+    return abs(s) * 0.5
+
+
+def _strip_filled_polygon(block: str) -> str:
+    """Remove every top-level ``(filled_polygon ...)`` sub-block from a zone
+    block. Also strips preceding whitespace/newline so we don't leave orphan
+    blank lines.
+    """
+    if not block.startswith("(zone"):
+        return block
+    # Walk subforms; collect spans (including leading whitespace) to drop.
+    body_start = len("(zone")
+    n = len(block)
+    i = body_start
+    spans: list[tuple[int, int]] = []
+    while i < n:
+        c = block[i]
+        if c == ")":
+            break
+        if c != "(":
+            i += 1
+            continue
+        end_idx = _find_block_end(block, i)
+        sub = block[i:end_idx]
+        if sub.startswith("(filled_polygon"):
+            # Extend left to swallow leading whitespace/newline.
+            left = i
+            while left > 0 and block[left - 1] in " \t":
+                left -= 1
+            if left > 0 and block[left - 1] == "\n":
+                left -= 1
+            spans.append((left, end_idx))
+        i = end_idx
+    if not spans:
+        return block
+    # Apply removals from the end backwards so indices remain valid.
+    out = block
+    for start, end in reversed(spans):
+        out = out[:start] + out[end:]
+    return out
+
+
+def _resolve_net_id(text: str, net_name: str) -> int | None:
+    """Scan top-level ``(net N "name")`` entries; return the id matching
+    ``net_name``. None if not found.
+    """
+    for open_idx, end_idx in _iter_top_blocks(text, "net"):
+        sub = text[open_idx:end_idx]
+        m = re.match(r'\(net\s+(\d+)\s+"((?:[^"\\]|\\.)*)"\s*\)', sub)
+        if not m:
+            # Net 0 may be emitted as (net 0 "") which still matches above.
+            continue
+        if m.group(2) == net_name:
+            return int(m.group(1))
+    return None
+
+
+# Top-level zone subform heads that should NOT be carried over when copying
+# settings to a new zone (these are per-zone identity / geometry).
+_ZONE_IDENTITY_HEADS = frozenset(
+    {"uuid", "name", "net", "net_name", "layer", "layers", "polygon", "filled_polygon"}
+)
+
+
+def _zone_settings_for_copy(block: str) -> str:
+    """Return a textual fragment of the zone block's "settings tail" — i.e.
+    every top-level subform EXCEPT identity / geometry forms (uuid, name,
+    net, net_name, layer/layers, polygon, filled_polygon).
+
+    The fragment preserves the original whitespace/newlines between the
+    retained subforms so it can be spliced into a freshly built zone block.
+    Leading whitespace before the first kept subform is included; trailing
+    whitespace up to (but not including) the closing ')' is preserved.
+    """
+    if not block.startswith("(zone"):
+        return ""
+    body_start = len("(zone")
+    n = len(block)
+    i = body_start
+    kept: list[str] = []
+    while i < n:
+        c = block[i]
+        if c == ")":
+            break
+        if c != "(":
+            i += 1
+            continue
+        end_idx = _find_block_end(block, i)
+        sub = block[i:end_idx]
+        m = re.match(r"\(([A-Za-z_][A-Za-z0-9_]*)", sub)
+        head = m.group(1) if m else ""
+        if head not in _ZONE_IDENTITY_HEADS:
+            # Capture leading whitespace (newline + tabs) before this subform.
+            left = i
+            while left > 0 and block[left - 1] in " \t":
+                left -= 1
+            if left > 0 and block[left - 1] == "\n":
+                left -= 1
+            kept.append(block[left:end_idx])
+        i = end_idx
+    return "".join(kept)
+
+
+def _build_zone_block(
+    *,
+    uuid: str,
+    name: str | None,
+    net_id: int,
+    net_name: str,
+    layer: str,
+    priority: int | None,
+    settings_tail: str,
+    polygon_points: list[tuple[float, float]],
+) -> str:
+    """Build a fresh ``(zone ...)`` block as a string.
+
+    Indentation matches KiCad's emitted format (tab indent, body lines at
+    depth-2 = two tabs). The block itself has no leading tab; callers are
+    expected to splice it in at depth 1 with the surrounding newline+tab.
+
+    If ``settings_tail`` is non-empty, it is spliced in after the polygon.
+    If ``priority`` is None, the ``(priority ...)`` line is omitted.
+    If ``name`` is None, the ``(name ...)`` line is omitted.
+    """
+    lines: list[str] = []
+    lines.append("(zone")
+    lines.append(f'\t\t(net {net_id})')
+    lines.append(f'\t\t(net_name "{net_name}")')
+    lines.append(f'\t\t(layer "{layer}")')
+    lines.append(f'\t\t(uuid "{uuid}")')
+    if name is not None:
+        # Escape embedded quotes.
+        esc = name.replace("\\", "\\\\").replace('"', '\\"')
+        lines.append(f'\t\t(name "{esc}")')
+    if priority is not None:
+        lines.append(f"\t\t(priority {int(priority)})")
+
+    # Polygon (outline).
+    poly_lines: list[str] = []
+    poly_lines.append("\t\t(polygon")
+    poly_lines.append("\t\t\t(pts")
+    for x, y in polygon_points:
+        poly_lines.append(f"\t\t\t\t(xy {_fmt_coord(x)} {_fmt_coord(y)})")
+    poly_lines.append("\t\t\t)")
+    poly_lines.append("\t\t)")
+    lines.extend(poly_lines)
+
+    head = "\n".join(lines)
+    # Settings tail (already contains its own leading newline + indent per
+    # kept subform). Append as-is, then close the zone form.
+    return head + settings_tail + "\n\t)"
+
+
 __all__ = [
     "move_footprint",
     "move_footprint_property",
