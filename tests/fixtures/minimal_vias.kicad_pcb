@@ -50,7 +50,7 @@
 		(size 0.8)
 		(drill 0.4)
 		(layers "F.Cu" "B.Cu")
-		(net "GND")
+		(net 1)
 		(uuid "00000000-0000-0000-0000-0000000030a1")
 	)
 	(via
@@ -59,7 +59,7 @@
 		(drill 0.3)
 		(layers "F.Cu" "B.Cu")
 		(free yes)
-		(net "VCC")
+		(net 2)
 		(uuid "00000000-0000-0000-0000-0000000030a2")
 	)
 	(embedded_fonts no)

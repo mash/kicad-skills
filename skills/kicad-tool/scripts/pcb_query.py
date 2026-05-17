@@ -528,7 +528,7 @@ def query_list(board: Board | str | Path, element: str) -> dict[str, Any]:
                     "size": _via_size(blk),
                     "drill": _via_drill(blk),
                     "layers": _via_layers(blk),
-                    "net": _via_net_name(blk),
+                    "net": _via_net_name(blk, text),
                     "uuid": _via_uuid(blk),
                     "free": _via_free(blk),
                     "locked": _via_locked(blk),
@@ -818,7 +818,7 @@ def query_via(
             "size": _via_size(blk),
             "drill": _via_drill(blk),
             "layers": _via_layers(blk),
-            "net": _via_net_name(blk),
+            "net": _via_net_name(blk, text),
             "free": _via_free(blk),
             "locked": _via_locked(blk),
         }

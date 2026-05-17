@@ -653,7 +653,7 @@ PCB_VIAS_TEMPLATE = """(kicad_pcb
 \t\t(size 0.8)
 \t\t(drill 0.4)
 \t\t(layers "F.Cu" "B.Cu")
-\t\t(net "GND")
+\t\t(net 1)
 \t\t(uuid "00000000-0000-0000-0000-0000000030a1")
 \t)
 \t(via
@@ -662,7 +662,7 @@ PCB_VIAS_TEMPLATE = """(kicad_pcb
 \t\t(drill 0.3)
 \t\t(layers "F.Cu" "B.Cu")
 \t\t(free yes)
-\t\t(net "VCC")
+\t\t(net 2)
 \t\t(uuid "00000000-0000-0000-0000-0000000030a2")
 \t)
 \t(embedded_fonts no)

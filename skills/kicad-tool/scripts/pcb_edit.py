@@ -2969,8 +2969,53 @@ def _via_uuid(block: str) -> str | None:
     return _via_field(block, "uuid")
 
 
-def _via_net_name(block: str) -> str | None:
+def _net_id_to_name(text: str, net_id: int) -> str | None:
+    """Inverse of ``_resolve_net_id``: scan top-level ``(net N "name")`` and
+    return the name matching ``net_id``."""
+    for open_idx, end_idx in _iter_top_blocks(text, "net"):
+        sub = text[open_idx:end_idx]
+        m = re.match(r'\(net\s+(\d+)\s+"((?:[^"\\]|\\.)*)"\s*\)', sub)
+        if not m:
+            continue
+        if int(m.group(1)) == net_id:
+            return m.group(2)
+    return None
+
+
+def _via_net_raw(block: str) -> str | None:
     return _via_field(block, "net")
+
+
+def _via_net_name(block: str, text: str | None = None) -> str | None:
+    """Return the net **name** for a via block.
+
+    KiCad emits ``(net <int>)`` for vias; this repo also accepts the legacy
+    quoted ``(net "NAME")`` form. When the raw value is numeric and ``text``
+    is provided, resolve the id to a name via the board's net table; otherwise
+    return the raw string as-is.
+    """
+    raw = _via_field(block, "net")
+    if raw is None:
+        return None
+    if re.fullmatch(r"-?\d+", raw):
+        if text is None:
+            return raw
+        resolved = _net_id_to_name(text, int(raw))
+        return resolved if resolved is not None else raw
+    return raw
+
+
+def _via_net_form(text: str) -> str:
+    """Return ``"int"`` or ``"str"`` based on the dominant ``(net ...)`` form
+    used by existing vias. Defaults to ``"int"`` (KiCad-canonical) when no via
+    is present, or when the first via uses int form. Any quoted form on the
+    first via switches to ``"str"`` for back-compat."""
+    for _o, _e, blk in _iter_via_blocks(text):
+        raw = _via_field(blk, "net")
+        if raw is None:
+            continue
+        return "int" if re.fullmatch(r"-?\d+", raw) else "str"
+    return "int"
 
 
 def _via_free(block: str) -> bool:
@@ -3035,12 +3080,16 @@ def _build_via_block(
     drill: float,
     layers: list[str],
     net_name: str,
+    net_id: int | None = None,
+    net_form: str = "int",
     free: bool = False,
     locked: bool = False,
 ) -> str:
     """Build a fresh ``(via ...)`` block body (no outer leading tab).
 
     Caller is responsible for the depth-1 leading tab when splicing.
+    ``net_form`` selects between ``(net <int>)`` (KiCad-canonical) and
+    ``(net "NAME")`` (legacy back-compat).
     """
     x, y = at
     lines: list[str] = []
@@ -3054,8 +3103,13 @@ def _build_via_block(
         lines.append("\t\t(free yes)")
     if locked:
         lines.append("\t\t(locked yes)")
-    esc = net_name.replace("\\", "\\\\").replace('"', '\\"')
-    lines.append(f'\t\t(net "{esc}")')
+    if net_form == "int":
+        if net_id is None:
+            raise ValueError("net_id required for int net_form")
+        lines.append(f"\t\t(net {net_id})")
+    else:
+        esc = net_name.replace("\\", "\\\\").replace('"', '\\"')
+        lines.append(f'\t\t(net "{esc}")')
     lines.append(f'\t\t(uuid "{uuid}")')
     lines.append("\t)")
     return "\n".join(lines)
@@ -3117,11 +3171,14 @@ def add_via(
     pcb_path = Path(pcb_path)
     text = _read(pcb_path)
 
-    if _resolve_net_id(text, net) is None:
+    net_id = _resolve_net_id(text, net)
+    if net_id is None:
         raise ValueError(f"unknown net {net!r}; add it to the netlist first")
 
     if layers is None:
         layers = ["F.Cu", "B.Cu"]
+    if len(layers) < 2:
+        raise ValueError("a via needs at least 2 layers")
     for ly in layers:
         _validate_layer(text, ly)
 
@@ -3132,8 +3189,10 @@ def add_via(
         if drill is None:
             drill = d_drill
 
-    new_uuid = _det_uuid(f"via:{net}:{at[0]}:{at[1]}:{layers}")
+    layers_key = tuple(sorted(layers))
+    new_uuid = _det_uuid(f"via:{net}:{at[0]}:{at[1]}:{layers_key}")
 
+    net_form = _via_net_form(text)
     new_block_body = _build_via_block(
         uuid=new_uuid,
         at=at,
@@ -3141,6 +3200,8 @@ def add_via(
         drill=drill,
         layers=layers,
         net_name=net,
+        net_id=net_id,
+        net_form=net_form,
         free=free,
     )
 
@@ -3190,7 +3251,7 @@ def delete_via(
     via_at = _via_at(block)
     details = {
         "uuid": _via_uuid(block),
-        "net": _via_net_name(block),
+        "net": _via_net_name(block, text),
         "at": {"x": via_at[0], "y": via_at[1]} if via_at else None,
         "layers": _via_layers(block),
     }
@@ -3313,16 +3374,24 @@ def set_via_property(
         new_block, _ = _set_top_via_field(block, "drill", _fmt_coord(new_value))
     elif key == "net":
         new_value = str(value)
-        if _resolve_net_id(text, new_value) is None:
+        new_net_id = _resolve_net_id(text, new_value)
+        if new_net_id is None:
             raise ValueError(f"unknown net {new_value!r}")
-        old_value = _via_net_name(block)
-        esc = new_value.replace("\\", "\\\\").replace('"', '\\"')
-        new_block, _ = _set_top_via_field(block, "net", f'"{esc}"')
+        old_value = _via_net_name(block, text)
+        # Preserve the block's existing net form.
+        raw = _via_net_raw(block)
+        if raw is not None and re.fullmatch(r"-?\d+", raw):
+            new_block, _ = _set_top_via_field(block, "net", str(new_net_id))
+        else:
+            esc = new_value.replace("\\", "\\\\").replace('"', '\\"')
+            new_block, _ = _set_top_via_field(block, "net", f'"{esc}"')
     elif key == "layers":
         if isinstance(value, list):
             layer_list = [str(v) for v in value]
         else:
             layer_list = [v.strip() for v in str(value).split(",") if v.strip()]
+        if len(layer_list) < 2:
+            raise ValueError("a via needs at least 2 layers")
         for ly in layer_list:
             _validate_layer(text, ly)
         new_value = layer_list
