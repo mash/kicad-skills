@@ -26,6 +26,28 @@ from kiutils.board import Board
 
 from text_collision_core import Rect
 
+import re as _re
+from pcb_edit import (
+    _find_block_end,
+    _iter_via_blocks,
+    _locate_zone,
+    _via_at,
+    _via_drill,
+    _via_free,
+    _via_layers,
+    _via_locked,
+    _via_net_name,
+    _via_size,
+    _via_uuid,
+    _zone_area_mm2,
+    _zone_field,
+    _zone_layer,
+    _zone_name,
+    _zone_net_name,
+    _zone_polygon_points,
+    _zone_uuid,
+)
+
 
 # ---------------------------------------------------------------------------
 # Loading & shared helpers
@@ -502,17 +524,6 @@ def query_list(board: Board | str | Path, element: str) -> dict[str, Any]:
     if element in ("via", "vias"):
         # kiutils Via doesn't expose free/locked/uuid uniformly, so fall back
         # to a textual scan for those fields (and uuid).
-        from pcb_edit import (
-            _iter_via_blocks,
-            _via_at,
-            _via_size,
-            _via_drill,
-            _via_layers,
-            _via_net_name,
-            _via_uuid,
-            _via_free,
-            _via_locked,
-        )
         path = getattr(b, "filePath", None)
         text = None
         if path is None and isinstance(board, (str, Path)):
@@ -599,8 +610,6 @@ def query_list(board: Board | str | Path, element: str) -> dict[str, Any]:
 def _zone_layers_multi(block: str) -> list[str] | None:
     """Return list of layer names if zone uses ``(layers "A" "B" ...)`` form;
     None if single-layer ``(layer ...)``."""
-    import re as _re
-    from pcb_edit import _find_block_end
     if not block.startswith("(zone"):
         return None
     body_start = len("(zone")
@@ -627,8 +636,6 @@ def _parse_connect_pads(block: str) -> dict[str, Any] | None:
     MODE may be ``yes`` / ``no`` / ``thru_hole_only`` / ``full`` etc., or
     absent (KiCad default).
     """
-    import re as _re
-    from pcb_edit import _find_block_end
     if not block.startswith("(zone"):
         return None
     body_start = len("(zone")
@@ -659,8 +666,6 @@ def _parse_fill(block: str) -> dict[str, Any] | None:
     Returns a dict with keys ``enabled`` (bool|None for unspecified) plus
     every nested ``(key value)`` subform as a string/number.
     """
-    import re as _re
-    from pcb_edit import _find_block_end
     if not block.startswith("(zone"):
         return None
     body_start = len("(zone")
@@ -719,17 +724,6 @@ def query_zone(
         raise TypeError("query_zone requires a file path, not a Board object")
     path = Path(board)
     text = path.read_text(encoding="utf-8")
-
-    from pcb_edit import (
-        _locate_zone,
-        _zone_uuid,
-        _zone_name,
-        _zone_net_name,
-        _zone_layer,
-        _zone_field,
-        _zone_polygon_points,
-        _zone_area_mm2,
-    )
 
     _open_idx, _end_idx, block = _locate_zone(
         text, uuid=uuid, name=name, net=net, layer=layer
@@ -794,18 +788,6 @@ def query_via(
         raise TypeError("query_via requires a file path, not a Board object")
     path = Path(board)
     text = path.read_text(encoding="utf-8")
-
-    from pcb_edit import (
-        _iter_via_blocks,
-        _via_at,
-        _via_size,
-        _via_drill,
-        _via_layers,
-        _via_net_name,
-        _via_uuid,
-        _via_free,
-        _via_locked,
-    )
 
     if (uuid is None) == (at is None):
         raise ValueError("exactly one of --uuid or --at must be specified")
