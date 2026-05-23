@@ -100,7 +100,7 @@ Re-run the validate / baseline command from step 1. When running stages individu
 
 - **ERC** / **Netlist**: always against the **top-level** (hierarchical ERC propagates into children). Never on a child sheet directly.
 - **Inspect**: each edited sheet.
-- **PCB DRC**: only when the board was edited; pass `--schematic-parity` for parity check.
+- **PCB DRC**: only when the board was edited; schematic parity is included by default.
 
 ### 4. Review
 
@@ -120,7 +120,7 @@ For `.kicad_pcb`:
 
 - Keep stable: `layers`, `setup`, `setup.stackup`, `Edge.Cuts`, title block — unless the task explicitly targets them.
 - High-risk fields: `net`, `footprint`, `segment`, `via`, `zone`.
-- Run `pcb drc` after board edits; use `--schematic-parity` for schematic/board parity.
+- Run `pcb drc` after board edits; schematic/board parity is included by default.
 - Document known KiCad CLI limitations separately from true DRC violations.
 
 Project-specific stackup and domain-separation rules live in the consuming repo's `hardware/pcb/` docs.

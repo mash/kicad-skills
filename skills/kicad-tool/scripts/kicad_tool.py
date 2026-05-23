@@ -579,9 +579,7 @@ def cmd_pcb_query_region(args: argparse.Namespace) -> int:
 
 def cmd_pcb_drc(args: argparse.Namespace) -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    command = [kicad_cli(), "pcb", "drc"]
-    if args.schematic_parity:
-        command.append("--schematic-parity")
+    command = [kicad_cli(), "pcb", "drc", "--schematic-parity"]
     command.extend(["--output", str(args.output), str(args.board)])
     result = command_result("pcb drc", command)
     if args.format == "text":
@@ -1844,7 +1842,6 @@ def build_parser() -> argparse.ArgumentParser:
     drc_parser = pcb_commands.add_parser("drc", help="run PCB DRC")
     drc_parser.add_argument("board", type=Path)
     drc_parser.add_argument("-o", "--output", type=Path, default=Path("tmp/cupwarmer-drc.rpt"))
-    drc_parser.add_argument("--schematic-parity", action="store_true")
     drc_parser.add_argument("--format", choices=["json", "text"], default="text")
     drc_parser.set_defaults(func=cmd_pcb_drc)
 

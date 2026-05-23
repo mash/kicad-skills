@@ -103,7 +103,7 @@ Entrypoint: `kicad-tool <domain> <command> ...`. Text output by default; pass `-
 
 | Command | Purpose |
 |---|---|
-| `pcb drc <board>` | PCB DRC; `-o/--output`, `--schematic-parity` |
+| `pcb drc <board>` | PCB DRC including schematic parity; `-o/--output` |
 | `pcb validate <board> <top.kicad_sch>` | DRC + ref/footprint-lib parity vs schematic; `--save-baseline DIR`, `--baseline DIR` |
 | `pcb render-region <board> <X1,Y1,X2,Y2>` | Cropped PNG (default agent layer set); `--layers F.Cu,F.SilkS,...`, `-o/--output` |
 | `pcb sync <board> <top.kicad_sch>` | Add missing footprints (5 mm staging grid) AND update each pad's `(net "...")` to match the schematic netlist; idempotent; tracks/vias/zones are not touched — orphaned net names are reported; `-o/--output`, `--dry-run` |

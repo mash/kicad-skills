@@ -51,7 +51,7 @@ Verify: `kicad-tool --help`.
 | `sch erc <top>` | ERC, hierarchical | `-o/--output <path>` |
 | `sch netlist <top>` | Netlist export | `-o/--output <path>` |
 | `sch validate <top>` | erc + netlist + inspect(--sheet) in one call | `--sheet <edited>`, `--save-baseline DIR`, `--baseline DIR` |
-| `pcb drc <board>` | PCB DRC | `-o/--output <path>`, `--schematic-parity` |
+| `pcb drc <board>` | PCB DRC, always including schematic parity | `-o/--output <path>` |
 | `pcb validate <board> <top.kicad_sch>` | DRC + ref/footprint-lib parity vs schematic | `--save-baseline DIR`, `--baseline DIR` |
 | `pcb render-region <board> <X1,Y1,X2,Y2>` | Cropped PNG of the board (default agent layer set) | `--layers F.Cu,F.SilkS,...`, `-o/--output <path>` |
 | `pcb sync <board> <top.kicad_sch>` | Add missing footprints (5 mm staging grid); swap footprints whose schematic `Footprint` property changed; refresh footprint bodies whose layout has drifted from the library `.kicad_mod` (KiCad GUI's "Update Footprints from Library") — all preserving position, rotation, board side, schematic-link (`path`/`sheetname`/`sheetfile`), pad nets, and user-added properties (e.g. `MPN`/`LCSC`/`Manufacturer`); update each pad's `(net "...")` to match the schematic netlist; idempotent. Tracks/vias/zones are not touched — orphaned net names from pad rename are reported. | `-o/--output <path>`, `--dry-run` |
