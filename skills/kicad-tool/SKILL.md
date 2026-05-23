@@ -56,6 +56,10 @@ Verify: `kicad-tool --help`.
 | `pcb render-region <board> <X1,Y1,X2,Y2>` | Cropped PNG of the board (default agent layer set) | `--layers F.Cu,F.SilkS,...`, `-o/--output <path>` |
 | `pcb sync <board> <top.kicad_sch>` | Add missing footprints (5 mm staging grid); swap footprints whose schematic `Footprint` property changed; refresh footprint bodies whose layout has drifted from the library `.kicad_mod` (KiCad GUI's "Update Footprints from Library") — all preserving position, rotation, board side, schematic-link (`path`/`sheetname`/`sheetfile`), pad nets, and user-added properties (e.g. `MPN`/`LCSC`/`Manufacturer`); update each pad's `(net "...")` to match the schematic netlist; idempotent. Tracks/vias/zones are not touched — orphaned net names from pad rename are reported. | `-o/--output <path>`, `--dry-run` |
 
+### PCB DRC in Codex sandbox
+
+On macOS, `kicad-cli pcb drc` may abort inside Codex's normal sandbox before writing a report, even when the same command works in the user's terminal. If `kicad-tool pcb drc ... --format json` reports `returncode: -6`, empty stdout/stderr, and no report file, re-run the exact `kicad-tool pcb drc ...` command with `sandbox_permissions="require_escalated"` and a narrow `prefix_rule` such as `["kicad-tool", "pcb", "drc"]`. A successful DRC process can still print `DRC: exit=0` while the generated `.rpt` contains violations, because this wrapper does not pass KiCad's `--exit-code-violations`.
+
 ### Query (read-only)
 
 Positional `<schematic.kicad_sch>`. Text by default; `--format json` only when piping to `jq`. Same content either way.
