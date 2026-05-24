@@ -29,6 +29,7 @@ from text_collision_core import Rect
 import re as _re
 from pcb_edit import (
     _find_block_end,
+    _iter_zone_blocks,
     _iter_via_blocks,
     _locate_zone,
     _via_at,
@@ -394,6 +395,40 @@ def _zone_bbox(zone) -> tuple[float, float, float, float] | None:
     return (min(xs), min(ys), max(xs), max(ys))
 
 
+def _zone_bbox_from_points(points: list[tuple[float, float]]) -> tuple[float, float, float, float] | None:
+    if not points:
+        return None
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _zone_summary_from_block(block: str) -> dict[str, Any]:
+    pts = _zone_polygon_points(block)
+    bb = _zone_bbox_from_points(pts)
+    layers_multi = _zone_layers_multi(block)
+    if layers_multi is not None:
+        layers = layers_multi
+        layer = layers[0] if layers else None
+    else:
+        layer = _zone_layer(block)
+        layers = [layer] if layer else []
+    out: dict[str, Any] = {
+        "uuid": _zone_uuid(block),
+        "name": _zone_name(block),
+        "net": _zone_net_name(block),
+        "layer": layer,
+        "layers": layers,
+        "area_mm2": _zone_area_mm2(pts),
+        "tstamp": None,
+    }
+    if bb is not None:
+        out["bbox"] = {"x1": bb[0], "y1": bb[1], "x2": bb[2], "y2": bb[3]}
+    else:
+        out["bbox"] = None
+    return out
+
+
 def query_region(board: Board | str | Path, bbox: tuple[float, float, float, float]) -> dict[str, Any]:
     b = _as_board(board)
     rect = Rect(bbox[0], bbox[1], bbox[2], bbox[3]).normalized()
@@ -457,20 +492,33 @@ def query_region(board: Board | str | Path, bbox: tuple[float, float, float, flo
                     })
 
     zone_hits: list[dict[str, Any]] = []
-    for zone in b.zones:
-        bb = _zone_bbox(zone)
-        if bb is None:
-            continue
-        zb = Rect(bb[0], bb[1], bb[2], bb[3]).normalized()
-        if rect.intersects_rect(zb):
-            zone_hits.append({
+    text = Path(board).read_text(encoding="utf-8") if isinstance(board, (str, Path)) else None
+    if text is not None:
+        zone_items = [_zone_summary_from_block(blk) for _o, _e, blk in _iter_zone_blocks(text)]
+    else:
+        zone_items = []
+        for zone in b.zones:
+            bb = _zone_bbox(zone)
+            zone_items.append({
                 "net": getattr(zone, "net", None),
                 "net_name": getattr(zone, "netName", None),
                 "layer": getattr(zone, "layer", None),
                 "layers": list(getattr(zone, "layers", []) or []),
-                "bbox": {"x1": zb.x1, "y1": zb.y1, "x2": zb.x2, "y2": zb.y2},
+                "bbox": {"x1": bb[0], "y1": bb[1], "x2": bb[2], "y2": bb[3]} if bb else None,
                 "tstamp": getattr(zone, "tstamp", None),
             })
+    for zone_item in zone_items:
+        zbb = zone_item.get("bbox")
+        if zbb is None:
+            continue
+        bb = (zbb["x1"], zbb["y1"], zbb["x2"], zbb["y2"])
+        if bb is None:
+            continue
+        zb = Rect(bb[0], bb[1], bb[2], bb[3]).normalized()
+        if rect.intersects_rect(zb):
+            hit = dict(zone_item)
+            hit["bbox"] = {"x1": zb.x1, "y1": zb.y1, "x2": zb.x2, "y2": zb.y2}
+            zone_hits.append(hit)
 
     return {
         "bbox": {"x1": rect.x1, "y1": rect.y1, "x2": rect.x2, "y2": rect.y2},
@@ -563,14 +611,28 @@ def query_list(board: Board | str | Path, element: str) -> dict[str, Any]:
         return {"element": "vias", "items": items}
     if element in ("zone", "zones"):
         items = []
-        for zone in b.zones:
-            items.append({
-                "net": getattr(zone, "net", None),
-                "net_name": getattr(zone, "netName", None),
-                "layer": getattr(zone, "layer", None),
-                "layers": list(getattr(zone, "layers", []) or []),
-                "tstamp": getattr(zone, "tstamp", None),
-            })
+        path = getattr(b, "filePath", None)
+        text = None
+        if path is None and isinstance(board, (str, Path)):
+            text = Path(board).read_text(encoding="utf-8")
+        elif path is not None:
+            text = Path(path).read_text(encoding="utf-8")
+        if text is not None:
+            for _o, _e, blk in _iter_zone_blocks(text):
+                items.append(_zone_summary_from_block(blk))
+        else:
+            for zone in b.zones:
+                bb = _zone_bbox(zone)
+                items.append({
+                    "uuid": None,
+                    "name": None,
+                    "net": getattr(zone, "net", None),
+                    "net_name": getattr(zone, "netName", None),
+                    "layer": getattr(zone, "layer", None),
+                    "layers": list(getattr(zone, "layers", []) or []),
+                    "bbox": {"x1": bb[0], "y1": bb[1], "x2": bb[2], "y2": bb[3]} if bb else None,
+                    "tstamp": getattr(zone, "tstamp", None),
+                })
         return {"element": "zones", "items": items}
     if element in ("drawing", "drawings"):
         items = []
